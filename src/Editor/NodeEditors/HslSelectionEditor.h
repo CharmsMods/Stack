@@ -17,6 +17,9 @@ struct HslSelectionEditorState {
     std::string selected,status;
     HslImageTool tool=HslImageTool::None;
     int preview=0,range=-1,handle=-1;
+    int graphBand=-1,graphHandle=-1;
+    bool localPick=false;
+    bool momentaryPreview=false;
     bool excludeRange=false,drawing=false,pending=false,pathOverflow=false,photoRouting=false;
     std::size_t gestureInput=0;
     std::uint64_t gestureRevision=0;
@@ -51,9 +54,11 @@ struct HslSelectionEditorState {
     std::string overlaySelection;
     int overlayMode=0;
     void EndGesture() {tool=HslImageTool::None;drawing=pending=pathOverflow=false;draft.reset();path.clear();handle=-1;rollers.EndInteraction();}
-    void EndInteraction() {EndGesture();preview=0;if(job)job->cancelled=true;reveal.Finish();toolPosition.Finish();rangePosition.Finish();previewPosition.Finish();}
+    void EndInteraction() {EndGesture();preview=0;momentaryPreview=false;if(job)job->cancelled=true;reveal.Finish();toolPosition.Finish();rangePosition.Finish();previewPosition.Finish();}
     ~HslSelectionEditorState(){if(job)job->cancelled=true;}
 };
+bool CommitHslImagePick(RawWorkspaceEditContext& context);
+bool DrawColorRangeSurface(RawWorkspaceEditContext& context,bool grade);
 bool DrawHslSelections(RawWorkspaceEditContext& context);
 bool HslNeedsAnalysis(const HslSelectionEditorState& state);
 // Captures an immutable draft; the normal node editor commits it in one edit.

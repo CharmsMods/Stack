@@ -609,8 +609,8 @@ bool EditorModule::RestoreRawWorkspaceGraphScopeReadbackForActiveLabTool() {
     if (const auto* node=SelectedEditingNode(); node && m_Project->nodeEditor &&
         node->kind==EditorNodeGraph::NodeKind::RawOperation &&
         (node->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ToneCurve ||
-         node->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ColorWarp)) {
-        const bool color = node->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ColorWarp;
+         (node->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ColorWarp || node->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ColorGrade))) {
+        const bool color = (node->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ColorWarp || node->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ColorGrade);
         const auto& saved=color ? m_RawWorkspaceColorWarpInputGraphScopeCache : m_RawWorkspaceFinishToneInputGraphScopeCache;
         const auto identity=Stack::Editor::NodeInputAnalysisIdentity(*m_Project->nodeEditor,
             m_Project->editRevision + (color ? m_Project->rawLayers.ProcessingRevision() : 0),CurrentUniformSourceIdentity(),m_TimelineUi.currentFrame);
@@ -1739,8 +1739,8 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
     if (const auto* selected=SelectedEditingNode(); selected && m_Project->nodeEditor &&
         selected->kind==EditorNodeGraph::NodeKind::RawOperation &&
         (selected->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ToneCurve ||
-         selected->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ColorWarp) && IsViewMode()) {
-        const bool color = selected->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ColorWarp;
+         (selected->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ColorWarp || selected->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ColorGrade)) && IsViewMode()) {
+        const bool color = (selected->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ColorWarp || selected->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ColorGrade);
         const auto compiled=std::find_if(snapshot.graph.nodes.begin(),snapshot.graph.nodes.end(),[&](const auto& node) {
             return node.authoredGraphId==m_Project->nodeEditor->layerId && node.authoredNodeUuid==m_Project->nodeEditor->nodeUuid;
         });

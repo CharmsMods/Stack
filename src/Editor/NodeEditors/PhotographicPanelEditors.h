@@ -12,5 +12,5 @@ bool DrawHslPanel(EditorModule&,RawWorkspaceEditContext&);
 bool DrawHslPanelControls(RawWorkspaceEditContext&);
 bool DrawLightPanelSettings(EditorModule&,RawWorkspaceEditContext&);
 bool DrawCalibrationPanelSettings(EditorModule&,RawWorkspaceEditContext&);
-void DrawMissingPanelControls(int order);
+void DrawMissingPanelControls(int order,bool colorTab);
 }

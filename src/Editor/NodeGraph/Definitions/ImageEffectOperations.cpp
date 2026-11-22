@@ -25,8 +25,16 @@ void AppendImageEffectOperations(std::vector<OperationRegistration>& operations)
         operations.push_back({OperationFamily::ImageEffects, std::move(definition)});
     };
 
-    for (int i = 0; i < static_cast<int>(Stack::RawRecipe::GraphOperationKind::Count); ++i)
-        add(MakeOperation(EditorNodeGraph::NodeKind::RawOperation, i, Stack::RawRecipe::GraphOperationLabel(static_cast<Stack::RawRecipe::GraphOperationKind>(i)), "Image Operations", std::string("raw-operation:") + Stack::RawRecipe::GraphOperationId(static_cast<Stack::RawRecipe::GraphOperationKind>(i))));
+    for (int i=0;i<static_cast<int>(Stack::RawRecipe::GraphOperationKind::Count);++i) {
+        using Kind=Stack::RawRecipe::GraphOperationKind;
+        const auto kind=static_cast<Kind>(i);
+        // These two declaration labels are part of existing projects' definition hashes.
+        const char* label=Stack::RawRecipe::GraphOperationLabel(kind);
+        if(kind==Kind::ColorWarp)label="Color Warp";
+        if(kind==Kind::ColorGrade)label="Color Grade";
+        add(MakeOperation(NodeKind::RawOperation,i,label,"Image Operations",
+            std::string("raw-operation:")+Stack::RawRecipe::GraphOperationId(kind)));
+    }
 
     for (const LayerDescriptor& descriptor : LayerRegistry::GetAllDescriptors()) {
         if (descriptor.type == LayerType::ViewTransform) continue;

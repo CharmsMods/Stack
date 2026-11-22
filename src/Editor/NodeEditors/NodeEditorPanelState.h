@@ -37,6 +37,8 @@ struct NodeEditorPanelState {
     std::optional<Project::NodeEditTarget> gestureTarget;
     std::optional<Project::NodeEditTarget> analysisTarget;
     std::optional<Project::NodeEditTarget> focusTarget;
+    std::optional<Project::NodeEditTarget> gradeHoverTarget;
+    int gradeSurfaceFrame=-10;
     int focusEnteredFrame=-1;
     bool visible = false;
     double floatingRevealStarted = -1.;

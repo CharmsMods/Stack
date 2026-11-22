@@ -278,7 +278,7 @@ inline void HashColorWarp(
         // metadata; every field below can change the resulting image.
         HashTypedValue(fingerprint,selection.enabled);
         HashTypedValue(fingerprint,selection.hue);HashTypedValue(fingerprint,selection.hueWidth);
-        HashTypedValue(fingerprint,selection.hueSoftness);HashTypedValue(fingerprint,selection.allColors);
+        HashTypedValue(fingerprint,selection.sourceChroma);HashTypedValue(fingerprint,selection.chromaReach);HashTypedValue(fingerprint,selection.warpMask);HashTypedValue(fingerprint,selection.hueSoftness);HashTypedValue(fingerprint,selection.allColors);
         HashTypedValue(fingerprint,selection.areaEnabled);HashTypedValue(fingerprint,selection.areaSoftness);
         HashTypedValue(fingerprint,selection.influence);
         for(const auto* bands:{&selection.bands,&selection.excludedBands}) {

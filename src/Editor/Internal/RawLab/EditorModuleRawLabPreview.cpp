@@ -1,3 +1,4 @@
+#include "Editor/NodeEditors/ColorGradeHover.h"
 #include "Editor/MaskToolBindings.h"
 #include "Raw/ColorWarpMath.h"
 #include "Hdr/Presentation.h"
@@ -709,7 +710,8 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
             GetRawWorkspaceColorWarpDisplayedPin(previewRecipe);
         const int colorWarpSelectionViewMode =
             GetRawWorkspaceColorWarpViewMode(previewRecipe);
-        const bool colorWarpDiagnosticHeld = ImGui::IsKeyDown(ImGuiKey_H);
+        const bool colorWarpDiagnosticHeld = ImGui::IsKeyDown(ImGuiKey_H) &&
+            !(preview.edit.nodeTarget && !m_NodeEditorState.Get<Stack::Editor::HslSelectionEditorState>(*preview.edit.nodeTarget).selected.empty());
         m_RawWorkspaceLabUi.colorWarpDiagnosticIsolateSelected =
             colorWarpDiagnosticHeld && ImGui::GetIO().KeyShift;
         const bool colorWarpDiagnosticRequested = colorWarpDiagnosticHeld ||
@@ -1001,6 +1003,13 @@ void EditorModule::RenderRawWorkspacePreviewCanvas(
         if (m_RawWorkspaceLabUi.activeTool == RawLabTool::Color &&
             currentRawPreview &&
             !m_EditingRawLayerMask && !capturingAsset && !IsRawImageNavigationActive()) {
+            if(preview.edit.nodeTarget && preview.edit.nodeTarget==m_NodeEditorPanel.gradeHoverTarget &&
+               m_NodeEditorPanel.gradeSurfaceFrame>=ImGui::GetFrameCount()-1) {
+                std::size_t identity=0;
+                const auto& scope=ColorWarpInput(preview.edit,identity);
+                auto& probe=m_NodeEditorState.Get<Stack::Editor::ColorGradeHover>(*preview.edit.nodeTarget);
+                probe.DrawImage(scope,identity,imageRect,!RawFloatingSurfaceOwnsPointer() && ImGui::IsWindowHovered());
+            }
             RenderColorWarpAreaSelector(preview.edit, areaOwner, imageRect);
         }
         if (selectedSource && !preview.edit.multiFrameResult && !m_EditingRawLayerMask && !capturingAsset) HandleRawWorkspaceLocalRangeTargetInteraction(
@@ -1253,19 +1262,28 @@ void EditorModule::RenderRawWorkspaceLabPreview(
     ImGui::PopStyleVar();
 }
 
+namespace {
+template<class ScopeCache>
+const RawDevelopmentGraphScopeReadback& FindColorWarpInput(
+    const Stack::Project::NodeEditTarget& target,std::size_t fingerprint,
+    const Stack::Editor::NodeEditorPanelAnalysis& panel,const ScopeCache& cache) {
+    static const RawDevelopmentGraphScopeReadback empty;
+    if (panel.acceptedFingerprint == fingerprint && panel.readback) return *panel.readback;
+    if (cache.sourceKey == target.Key() && cache.inputFingerprint == fingerprint) return cache.readback;
+    return empty;
+}
+
+}
+
 const RawDevelopmentGraphScopeReadback& EditorModule::ColorWarpInput(
     const RawWorkspaceEditContext& context, std::size_t& fingerprint) const {
     static const RawDevelopmentGraphScopeReadback empty;
     if (!context.nodeTarget) return empty;
-    const auto& target = *context.nodeTarget;
-    fingerprint = Stack::Editor::NodeInputAnalysisIdentity(target,
-        m_Project->editRevision + m_Project->rawLayers.ProcessingRevision(),
-        CurrentUniformSourceIdentity(), m_TimelineUi.currentFrame);
-    const auto& panel = m_NodeEditorState.Get<Stack::Editor::NodeEditorPanelAnalysis>(target);
-    if (panel.acceptedFingerprint == fingerprint && panel.readback) return *panel.readback;
-    const auto& cache = m_RawWorkspaceColorWarpInputGraphScopeCache;
-    if (cache.sourceKey == target.Key() && cache.inputFingerprint == fingerprint) return cache.readback;
-    return empty;
+    const auto& target=*context.nodeTarget;
+    fingerprint=Stack::Editor::NodeInputAnalysisIdentity(target,
+        m_Project->editRevision+m_Project->rawLayers.ProcessingRevision(),CurrentUniformSourceIdentity(),m_TimelineUi.currentFrame);
+    return FindColorWarpInput(target,fingerprint,m_NodeEditorState.Get<Stack::Editor::NodeEditorPanelAnalysis>(target),
+        m_RawWorkspaceColorWarpInputGraphScopeCache);
 }
 
 Stack::EditorModuleTypes::RawWorkspaceColorWarpAreaOwner EditorModule::ColorWarpAreaOwner(
@@ -1276,6 +1294,21 @@ Stack::EditorModuleTypes::RawWorkspaceColorWarpAreaOwner EditorModule::ColorWarp
 }
 
 void EditorModule::RenderGraphColorWarpAreaSelector(const ImRect& imageRect) {
+    if(IsViewMode() && !m_NodeOpenTransition.Active() && !IsRawImageNavigationActive() &&
+       !Stack::Workspace::IsPreview() && m_NodeEditorPanel.gradeHoverTarget &&
+       m_NodeEditorPanel.gradeHoverTarget->documentId==GetProjectDocumentId() &&
+       m_NodeEditorPanel.gradeSurfaceFrame>=ImGui::GetFrameCount()-1) {
+        const auto& target=*m_NodeEditorPanel.gradeHoverTarget;
+        auto& probe=m_NodeEditorState.Get<Stack::Editor::ColorGradeHover>(target);
+        const bool photoHover=imageRect.Contains(ImGui::GetIO().MousePos) && !RawFloatingSurfaceOwnsPointer() && ImGui::IsWindowHovered();
+        if(photoHover || (probe.overMap && probe.mapRect.Contains(ImGui::GetIO().MousePos))) {
+            const auto identity=Stack::Editor::NodeInputAnalysisIdentity(target,m_Project->editRevision+
+                m_Project->rawLayers.ProcessingRevision(),CurrentUniformSourceIdentity(),m_TimelineUi.currentFrame);
+            const auto& scope=FindColorWarpInput(target,identity,m_NodeEditorState.Get<Stack::Editor::NodeEditorPanelAnalysis>(target),
+                m_RawWorkspaceColorWarpInputGraphScopeCache);
+            probe.DrawImage(scope,identity,imageRect,photoHover);
+        }
+    }
     if (!IsViewMode() || m_RawWorkspaceLabUi.activeTool != RawLabTool::Color ||
         !m_Project->nodeEditor || m_NodeOpenTransition.Active() || IsRawImageNavigationActive() ||
         Stack::Workspace::IsPreview()) return;

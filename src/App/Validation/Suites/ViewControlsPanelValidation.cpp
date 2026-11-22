@@ -83,6 +83,13 @@ bool ValidateViewControlsPanel(const std::filesystem::path& output, bool tiltOnl
         require(document.Load(payload.at("rawLayerStack"),error),error.c_str());
         auto layers=document.State();
         auto& background=layers.background.graph;
+        const auto* grade=Project::FindRawOperation(layers.background,RawRecipe::GraphOperationKind::ColorGrade);
+        const auto* hsl=Project::FindRawOperation(layers.background,RawRecipe::GraphOperationKind::ColorWarp);
+        const auto* result=Project::FindRawRole(layers.background,Stack::GraphModel::NodeRole::LayerResult);
+        const auto* gradeInput=grade?background.FindInputLink(grade->id,"imageIn"):nullptr;
+        const auto* resultInput=result?background.FindInputLink(result->id,"imageIn"):nullptr;
+        require(hsl && gradeInput && gradeInput->fromNodeId==hsl->id && resultInput && resultInput->fromNodeId==grade->id,
+            "New Background must end with HSL, Color Grade and Layer result.");
         int ingress=0;
         for(const auto& node:background.GetNodes()) if(node.role==Stack::GraphModel::NodeRole::CurrentImage) ingress=node.id;
         const auto oldLink=*background.FindOutputLink(ingress);
@@ -139,8 +146,9 @@ bool ValidateViewControlsPanel(const std::filesystem::path& output, bool tiltOnl
         require(editor->GetRawLayerToolIndex()==selectedBefore,"Drawing multiple tools changed selection.");
         auto controls=primaries();
         const auto& fixed=Editor::PhotographicPanelDefinitions();
-        require(fixed.size()==3 && std::string(fixed[0]->panelLabel)=="Light" &&
-            std::string(fixed[1]->panelLabel)=="Tone" && std::string(fixed[2]->panelLabel)=="HSL","Fixed panel inventory/order changed.");
+        require(fixed.size()==4 && std::string(fixed[0]->panelLabel)=="Light" &&
+            std::string(fixed[1]->panelLabel)=="Tone" && std::string(fixed[2]->panelLabel)=="Warp" &&
+            std::string(fixed[3]->panelLabel)=="Grade","Photographic panel inventory/order changed.");
         require(!controls.empty(),"The Controls tab did not draw registered primary tools.");
         for (auto* item:controls) {
             require(item->Size.x<=width && item->Pos.x>=20,"A primary surface overflowed the panel.");
@@ -177,6 +185,12 @@ bool ValidateViewControlsPanel(const std::filesystem::path& output, bool tiltOnl
         editor->CancelMaskAuthoring();
         require(editor->SerializePipeline().at("rawLayerStack")==authored,"Choosing or canceling a mask changed the graph.");
         frame();
+        editor->SetViewSectionTab(4);
+        for(int i=0;i<5;++i)frame();
+        controls=primaries();
+        require(!controls.empty(),"Color controls did not open.");
+        require(editor->SerializePipeline().at("rawLayerStack")==authored,"Switching between Light and Color changed the graph.");
+        capture("color-360.png");
         io.AddMousePosEvent(40,controls.front()->Pos.y-(ImGui::GetFontSize()+10.f)*.5f-ImGui::GetStyle().ItemSpacing.y);frame();
         io.AddMouseWheelEvent(0,-12);for (int i=0;i<5;++i) frame();
         bool scrolled=false;
@@ -221,6 +235,8 @@ bool ValidateViewControlsPanel(const std::filesystem::path& output, bool tiltOnl
             }
         }
         require(returnedToTop,"The Controls body did not settle back at the top.");
+        editor->SetViewSectionTab(1);
+        for(int i=0;i<3;++i)frame();
         controls=primaries();
         require(controls.size()>1,"The fixed sections did not render.");
         const Project::NodeEditTarget firstTarget{editor->GetProjectDocumentId(),layers.background.id,firstUuid};
@@ -336,12 +352,12 @@ bool ValidateViewControlsPanel(const std::filesystem::path& output, bool tiltOnl
         io.AddMouseButtonEvent(0,false);curveFrame();
         require(!curveState.gesture && ImGui::GetActiveID()==0,"The curve retained its gesture after release.");
         // Preferences use the production serializer, separately from image data.
-        RawWorkspace::AppState settings;settings.viewSectionTab=1;settings.viewSectionOpen=false;
+        RawWorkspace::AppState settings;settings.viewSectionTab=4;settings.viewSectionOpen=false;
         const auto preferenceFile=output/"presentation.json";
         require(RawWorkspace::SaveAppState(preferenceFile,settings,&error),error.c_str());
         RawWorkspace::AppState restored;
         require(RawWorkspace::LoadAppState(preferenceFile,restored,&error),error.c_str());
-        require(restored.viewSectionTab==1 && !restored.viewSectionOpen,"Controls presentation did not survive app-state reload.");
+        require(restored.viewSectionTab==4 && !restored.viewSectionOpen,"Controls presentation did not survive app-state reload.");
         std::cout<<"Fixed Controls: inventory/order, duplicate targeting, focus/return, middle click, roller limits/cancel, undo/redo, missing/restored nodes, idle layout, scrolling, narrow layout, release and preferences passed.\n";
         success=true;
         }

@@ -99,7 +99,7 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
     GraphNodeRenderResult& result,
     const Stack::RawRecipe::RawDevelopmentRecipe& recipe,
     std::size_t inputFingerprint, int sourceWidth, int sourceHeight,
-    const Raw::ViewportRegion& inputRegion) {
+    const Raw::ViewportRegion& inputRegion,const std::array<unsigned int,16>* pickMasks) {
     const Stack::RawRecipe::RawColorWarpRecipe colorWarp =
         Stack::RawRecipe::SanitizeColorWarpRecipe(recipe.colorWarp);
     if (!Stack::RawRecipe::IsColorWarpEnabled(colorWarp)) {
@@ -474,8 +474,20 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
 
     const unsigned int inputTexture = result.texture;
     Stack::Renderer::ScopedGLTexture selectionTexture;
+    std::array<unsigned int,8> boundPickMasks{};
+    int pickMaskCount=0;
     if(!colorWarp.hslSelections.empty()) {
-        const auto selectionData=Stack::RawRecipe::PackHslSelections(colorWarp);
+        auto selectionData=Stack::RawRecipe::PackHslSelections(colorWarp);
+        if(pickMasks)for(std::size_t i=0;i<colorWarp.hslSelections.size();++i) {
+            const auto& pick=colorWarp.hslSelections[i];
+            if(!pick.warpMask || !pick.areaEnabled)continue;
+            auto* row=selectionData.data()+i*Stack::RawRecipe::kHslDataWidth;
+            if(!(*pickMasks)[i]){row[0][0]=0;continue;}
+            if(pickMaskCount>=int(boundPickMasks.size()))throw std::runtime_error("Too many active local Warp masks.");
+            boundPickMasks[pickMaskCount++]=(*pickMasks)[i];
+            row[109][2]=float(pickMaskCount);
+            row[2][2]=-1; // The connected mask owns spatial coverage.
+        }
         selectionTexture.Reset(GLHelpers::CreateTextureFromData(selectionData.data(),Stack::RawRecipe::kHslDataWidth,
             static_cast<int>(colorWarp.hslSelections.size()),GL_RGBA32F,GL_RGBA,GL_FLOAT));
         if(!selectionTexture) {
@@ -492,6 +504,12 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
             while (glGetError() != GL_NO_ERROR) {
             }
             glUseProgram(program);
+            for(int i=0;i<pickMaskCount;++i) {
+                glActiveTexture(GL_TEXTURE0+6+i);
+                glBindTexture(GL_TEXTURE_2D,boundPickMasks[i]);
+                const auto uniform="uWarpPickMasks["+std::to_string(i)+"]";
+                glUniform1i(glGetUniformLocation(program,uniform.c_str()),6+i);
+            }
             glActiveTexture(GL_TEXTURE5);glBindTexture(GL_TEXTURE_2D,selectionTexture?selectionTexture.Get():inputTexture);
             glUniform1i(glGetUniformLocation(program,"uHslSelections"),5);
             glUniform1i(glGetUniformLocation(program,"uHslSelectionCount"),static_cast<int>(colorWarp.hslSelections.size()));
@@ -560,6 +578,8 @@ bool RenderPipeline::RenderRawDevelopmentColorWarpStage(
             }
             glActiveTexture(GL_TEXTURE0);
             m_Quad.Draw();
+            for(int i=0;i<pickMaskCount;++i){glActiveTexture(GL_TEXTURE0+6+i);glBindTexture(GL_TEXTURE_2D,0);}
+            glActiveTexture(GL_TEXTURE0);
             glUseProgram(0);
         });
     const GLenum drawError = glGetError();

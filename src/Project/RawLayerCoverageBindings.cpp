@@ -76,6 +76,36 @@ bool WriteRawLayerOperation(RawAdjustmentLayer& layer, const std::string& uuid,
             const nlohmann::json::json_pointer path(parameter.path);
             if (authored.parameters.contains(path)) layer.graph.FindNode(operationId)->rawOperation.parameters[path]=authored.parameters.at(path);
         }
+    if(authored.kind==RawRecipe::GraphOperationKind::ColorWarp) {
+        const auto previous=authored.parameters.find("hslSelections");
+        const auto position=layer.graph.FindNode(operationId)->position;
+        int ordinal=0;
+        for(const auto& pick:recipe.colorWarp.hslSelections) {
+            if(!pick.warpMask)continue;
+            ++ordinal;
+            const auto port="area:warp-"+pick.id;
+            if(layer.graph.FindInputLink(operationId,port))continue;
+            if(previous!=authored.parameters.end() && std::any_of(previous->begin(),previous->end(),[&](const auto& entry){
+                return entry.value("warpMask",false) && entry.value("id",std::string{})==pick.id;
+            }))continue; // Preserve an intentional disconnection.
+            EditorNodeGraph::CustomMaskPayload payload;
+            EditorNodeGraph::CustomMaskObject shape;
+            shape.id=1;shape.type=EditorNodeGraph::CustomMaskObjectType::Polygon;
+            for(const auto& point:pick.outline)shape.points.push_back({point[0],point[1]});
+            payload.objects.push_back(std::move(shape));payload.nextObjectId=2;
+            auto* mask=layer.graph.AddCustomMaskNode(std::move(payload),{position.x-220,position.y+150.f*ordinal});
+            if(!mask){error="Could not create the Warp pick mask.";return false;}
+            mask->title=pick.name+" mask";mask->rawCoverage={{"canvas","project"}};
+            if(!layer.graph.TryConnectSockets(mask->id,"maskOut",operationId,port,&error))return false;
+        }
+        auto& links=layer.graph.EditLinks();
+        links.erase(std::remove_if(links.begin(),links.end(),[&](const auto& link){
+            return link.toNodeId==operationId && link.toSocketId.rfind("area:warp-",0)==0 &&
+                std::none_of(recipe.colorWarp.hslSelections.begin(),recipe.colorWarp.hslSelections.end(),
+                    [&](const auto& pick){return pick.warpMask && link.toSocketId=="area:warp-"+pick.id;});
+        }),links.end());
+        return true;
+    }
     if (operation->rawOperation.kind != RawRecipe::GraphOperationKind::LocalEv) return true;
     const auto serialized = RawRecipe::SerializeRecipe(recipe);
     const auto bind = [&](const std::string& port, EditorNodeGraph::MaskGeneratorKind kind,

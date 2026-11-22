@@ -159,6 +159,7 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawOperation(
             }
             break;
         }
+        case GraphOperationKind::ColorGrade:
         case GraphOperationKind::ColorWarp:
             if (IsColorWarpEnabled(recipe.colorWarp)) {
                 const auto key = GraphExecution::MakeNodeSocketKey(
@@ -166,8 +167,19 @@ RenderPipeline::GraphNodeRenderResult RenderPipeline::RenderRawOperation(
                 const auto cached = context.imageFingerprintCache.find(key);
                 const auto inputFingerprint = cached == context.imageFingerprintCache.end()
                     ? 0u : cached->second;
+                std::array<unsigned int,16> pickMasks{};
+                const auto geometry=m_CurrentGraphImageGeometry;
+                for(std::size_t i=0;i<recipe.colorWarp.hslSelections.size();++i) {
+                    const auto& pick=recipe.colorWarp.hslSelections[i];
+                    if(!pick.warpMask || !pick.areaEnabled)continue;
+                    const auto* link=context.FindInputLink(node.nodeId,"area:warp-"+pick.id);
+                    if(!link)continue;
+                    pickMasks[i]=evalMask(link->fromNodeId,link->fromSocketId);
+                    if(!pickMasks[i])throw std::runtime_error("Warp pick mask is unavailable.");
+                    m_Width=width;m_Height=height;m_CurrentGraphImageGeometry=geometry;
+                }
                 if (!RenderRawDevelopmentColorWarpStage(result, recipe,
-                    inputFingerprint, nativeWidth, nativeHeight, inputRegion)) return {};
+                    inputFingerprint, nativeWidth, nativeHeight, inputRegion,&pickMasks)) return {};
                 if (result.owned) processed.Reset(result.texture);
             }
             break;

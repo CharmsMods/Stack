@@ -162,9 +162,11 @@ void main() {
     float familyGain=1.0;
     if(uHslModel!=0) {
         ivec2 segment;float t;hslSegment(hue,segment,t);
-        vec3 family=resolveHsl(hslAdjustment(segment,t),hue,ev,segment,t);
+        vec3 grade;
+        vec3 family=resolveHsl(hslAdjustment(segment,t),hue,ev,segment,t,chroma,grade);
         float guard=neutral*shadow;
         float influence=uStrength*(1.0-protection);
+        movement+=grade.xy*influence;adjustment.z+=grade.z*influence;
         adjustment.x+=family.x*influence*guard;
         adjustment.z+=family.z*influence*guard;
         familyGain=max(0.0,1.0+family.y*influence*(family.y>0.0?guard:1.0));

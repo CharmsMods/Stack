@@ -111,7 +111,8 @@ bool PanelRoller(const char* label,const char* id,float& value,float minimum,flo
         }
         ImGui::EndPopup();
     }
-    ImGui::SetCursorScreenPos({origin.x,origin.y+height+ImGui::GetStyle().ItemSpacing.y});
+    ImGui::SetCursorScreenPos(origin);
+    ImGui::ItemSize(ImVec2(width,height));
     ImGui::PopID();
     return changed;
 }

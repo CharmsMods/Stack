@@ -850,6 +850,10 @@ void Serialization::ReadCurrentGraphPayload(
         } else if (kind == "RawOperation") {
             node.kind = NodeKind::RawOperation;
             node.rawOperation = Stack::RawRecipe::DeserializeGraphOperation(item.at("rawOperation"));
+            using Kind=Stack::RawRecipe::GraphOperationKind;
+            if((node.rawOperation.kind==Kind::ColorWarp && (node.title=="Color Warp" || node.title=="HSL")) ||
+               (node.rawOperation.kind==Kind::ColorGrade && node.title=="Color Grade"))
+                node.title=Stack::RawRecipe::GraphOperationLabel(node.rawOperation.kind);
         } else if (kind == "TechnicalImage") {
             node.kind = NodeKind::TechnicalImage;
             node.technicalImageSettings = DeserializeTechnicalImageSettings(

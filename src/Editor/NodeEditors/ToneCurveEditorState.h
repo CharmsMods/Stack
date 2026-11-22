@@ -12,6 +12,7 @@ struct ToneCurveEditorState {
         if (advanced) {advanced->ClearViewportProbe();advanced->EndViewportTargetDrag();}
     }
     int photoChannel=0; // White selects luminance. This is presentation state only.
+    int panelRgbChannel=1;
     int component=0, selected=-1, dragging=-1;
     float minimum=-16, maximum=16;
     std::array<RawLabInternal::CurveCanvasState,5> canvas;

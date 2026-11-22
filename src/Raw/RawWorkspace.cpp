@@ -2277,7 +2277,7 @@ bool SaveAppStateIfCurrent(
         ? 9
         : std::clamp(state.rawLabActiveTool, 0, 7);
     root["rawLabActivePointCurve"] = std::clamp(state.rawLabActivePointCurve, 0, 3);
-    root["viewSectionTab"] = std::clamp(state.viewSectionTab,0,3);
+    root["viewSectionTab"] = std::clamp(state.viewSectionTab,0,4);
     root["viewSectionOpen"] = state.viewSectionOpen;
     root["rawLabColorWarpLiveCloud"] = state.rawLabColorWarpLiveCloud;
     root["rawLabLastGalleryHost"] = state.rawLabLastGalleryHost == 3 ? 3 : 1;
@@ -2426,7 +2426,7 @@ bool LoadAppState(const std::filesystem::path& path, AppState& outState, std::st
                 rawLabColorWarpLiveCloud->get<bool>();
         }
         if (const auto* tab=FindJsonMember(root,"viewSectionTab"); tab && tab->is_number_integer())
-            outState.viewSectionTab=std::clamp(tab->get<int>(),0,3);
+            outState.viewSectionTab=std::clamp(tab->get<int>(),0,4);
         if (const auto* open=FindJsonMember(root,"viewSectionOpen"); open && open->is_boolean())
             outState.viewSectionOpen=open->get<bool>();
         const nlohmann::json* rawLabLastGalleryHost = FindJsonMember(root, "rawLabLastGalleryHost");

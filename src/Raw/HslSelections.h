@@ -30,11 +30,30 @@ inline float HslAreaWeight(const HslSelection& s,std::array<float,2> p) {
     }
     return inside?(s.areaSoftness>0?HslSmooth(distance/s.areaSoftness):1.f):0.f;
 }
+inline float NeutralRangeWeight(const RawColorWarpCoordinate& c) {
+    const auto ab=ColorWarpSelectionCoordinate(c);
+    return 1.f-HslSmooth((std::hypot(ab[0],ab[1])-.02f)/.06f);
+}
+inline float WarpChromaWeight(const HslSelection& s,const RawColorWarpCoordinate& input) {
+    if(s.sourceChroma<0)return 1.f;
+    const auto ab=ColorWarpSelectionCoordinate(input);
+    const float distance=std::abs(std::hypot(ab[0],ab[1])-s.sourceChroma);
+    const float feather=std::min(.035f,s.chromaReach);
+    return HslSmooth((s.chromaReach-distance)/feather);
+}
+inline float HslHueWeight(const HslSelection& s,const RawColorWarpCoordinate& input,float hue) {
+    if(s.neutralOnly)return NeutralRangeWeight(input);
+    if(s.allColors)return 1.f;
+    const float distance=std::abs(ColorWarpHueDelta(hue-s.hue));
+    const float edge=distance-s.hueWidth;
+    if(s.sourceChroma>=0 && s.hueSoftness>0 && s.hueWidth>0)
+        return HslSmooth(-edge/std::min(s.hueWidth,s.hueSoftness));
+    return edge<=0?1.f:s.hueSoftness>0?1-HslSmooth(edge/s.hueSoftness):0.f;
+}
 inline float HslSelectionWeight(const HslSelection& s,const RawColorWarpCoordinate& c,std::array<float,2> uv) {
     if(!s.enabled || c.lightness<=0)return 0;
-    const float d=std::abs(ColorWarpHueDelta(ColorWarpHue(c.a,c.b)-s.hue))-s.hueWidth;
-    const float color=s.allColors?1.f:d<=0?1.f:s.hueSoftness>0?1-HslSmooth(d/s.hueSoftness):0.f;
-    return color*HslBrightnessWeight(s,c.sceneEv)*HslAreaWeight(s,uv);
+    const float color=HslHueWeight(s,c,ColorWarpHue(c.a,c.b));
+    return WarpChromaWeight(s,c)*color*HslBrightnessWeight(s,c.sceneEv)*HslAreaWeight(s,uv);
 }
 inline ColorWarpHslCoefficients HslOwnCoefficients(const HslSelection& s) {
     ColorWarpHslCoefficients c{};
@@ -59,7 +78,7 @@ inline HslSelectionEvaluation PrepareHslSelectionEvaluation(const HslSelection& 
 }
 inline std::array<float,3> ResolveHslSelections(const RawColorWarpRecipe& recipe,
     const RawColorWarpCoordinate& input,std::array<float,3> global,std::array<float,2> uv,
-    const std::vector<HslSelectionEvaluation>* prepared=nullptr) {
+    const std::vector<HslSelectionEvaluation>* prepared=nullptr,std::array<float,3>* grade=nullptr) {
     auto result=recipe.limitHslToSelections?std::array<float,3>{}:global;
     if(input.lightness<=0)return result;
     // All selection curves use the same immutable anchors. Preserve their raw
@@ -75,11 +94,11 @@ inline std::array<float,3> ResolveHslSelections(const RawColorWarpRecipe& recipe
             const auto& bounds=evaluation->bounds;
             if(uv[0]<bounds[0] || uv[1]<bounds[1] || uv[0]>bounds[2] || uv[1]>bounds[3])continue;
         }
-        const float d=std::abs(ColorWarpHueDelta(hue-s.hue))-s.hueWidth;
-        const float color=s.allColors?1.f:d<=0?1.f:s.hueSoftness>0?1-HslSmooth(d/s.hueSoftness):0.f;
+        const float color=HslHueWeight(s,input,hue);
         if(color<=0)continue;
         const float brightness=HslBrightnessWeight(s,input.sceneEv);if(brightness<=0)continue;
-        const float w=color*brightness*HslAreaWeight(s,uv);if(w<=0)continue;
+        const float w=WarpChromaWeight(s,input)*color*brightness*HslAreaWeight(s,uv);if(w<=0)continue;
+        if(grade)for(int channel=0;channel<3;++channel)(*grade)[channel]+=w*s.grade[channel];
         std::array<float,3> own{};
         if(s.own[0] || s.own[1] || s.own[2]) {
             ColorWarpHslCoefficients temporary;
@@ -89,6 +108,7 @@ inline std::array<float,3> ResolveHslSelections(const RawColorWarpRecipe& recipe
             own=EvaluateColorWarpHsl(*coefficients,segment);
         }
         for(int channel=0;channel<3;++channel) {
+            if(s.independentChannels && !s.own[channel])continue;
             const float target=s.own[channel]?own[channel]:global[channel]*s.influence;
             result[channel]+=w*(target-result[channel]);
         }
@@ -101,8 +121,10 @@ inline void HslDetachChannel(HslSelection& s,int channel,const RawColorWarpRecip
     s.own[channel]=true;
 }
 inline bool HslHasOwnAdjustment(const RawColorWarpRecipe& recipe) {
-    for(const auto& s:recipe.hslSelections)if(s.enabled)
+    for(const auto& s:recipe.hslSelections)if(s.enabled) {
+        if(s.grade!=std::array<float,3>{})return true;
         for(int c=0;c<3;++c)if(s.own[c])for(const auto& v:s.values)if(v[c]!=0)return true;
+    }
     return false;
 }
 // One compact float texture avoids increasing the GL 3.3 fragment-uniform
@@ -113,9 +135,9 @@ inline std::vector<std::array<float,4>> PackHslSelections(const RawColorWarpReci
     for(std::size_t i=0;i<recipe.hslSelections.size();++i) {
         const auto& s=recipe.hslSelections[i];auto* row=data.data()+i*kHslDataWidth;
         row[0]={s.enabled?1.f:0.f,s.hue,s.hueWidth,s.hueSoftness};
-        row[1]={s.influence,s.own[0]?1.f:0.f,s.own[1]?1.f:0.f,s.own[2]?1.f:0.f};
+        row[1]={s.independentChannels?-1.f:s.influence,s.own[0]?1.f:0.f,s.own[1]?1.f:0.f,s.own[2]?1.f:0.f};
         row[2]={float(s.bands.size()),float(s.excludedBands.size()),s.areaEnabled?float(s.outline.size()):-1.f,s.areaSoftness};
-        row[3]={s.allColors?1.f:0.f,0,0,0};
+        row[3]={s.neutralOnly?2.f:s.allColors?1.f:0.f,s.grade[0],s.grade[1],s.grade[2]};
         for(int j=0;j<8;++j)row[4+j]={s.values[j][0],s.values[j][1],s.values[j][2],0};
         for(std::size_t j=0;j<s.bands.size();++j)row[12+j]={s.bands[j].low,s.bands[j].high,s.bands[j].softness,0};
         for(std::size_t j=0;j<s.excludedBands.size();++j)row[28+j]={s.excludedBands[j].low,s.excludedBands[j].high,s.excludedBands[j].softness,0};
@@ -123,6 +145,7 @@ inline std::vector<std::array<float,4>> PackHslSelections(const RawColorWarpReci
             // Two points per texel.
             row[44+j/2][(j%2)*2]=s.outline[j][0];row[44+j/2][(j%2)*2+1]=s.outline[j][1];
         }
+        row[109]={s.sourceChroma,s.chromaReach,0,0};
         row[108]={1,1,0,0};for(const auto& p:s.outline){row[108][0]=std::min(row[108][0],p[0]);row[108][1]=std::min(row[108][1],p[1]);row[108][2]=std::max(row[108][2],p[0]);row[108][3]=std::max(row[108][3],p[1]);}
     }
     return data;

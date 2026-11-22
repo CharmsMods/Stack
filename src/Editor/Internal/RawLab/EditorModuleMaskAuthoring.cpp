@@ -1,3 +1,4 @@
+#include "Editor/NodeEditors/PhotographicPanelTabs.h"
 #include "Editor/EditorModule.h"
 #include "Editor/Internal/GraphEditorCommands.h"
 #include "Project/AuthoredMask.h"
@@ -42,7 +43,7 @@ void EditorModule::StartMaskTool(MaskAuthoring::Tool tool) {
         m_RawAssetCapture.armed=false;
         s.phase=Phase::Destination;s.document=m_Project->documentId;s.load=m_Project->files->load.generation;
         s.frame=m_TimelineUi.currentFrame;s.edit=m_Project->editRevision;s.rawEdit=m_Project->rawLayers.ProcessingRevision();
-        s.previousTab=m_ViewSectionTab;m_ViewSectionTab=1;s.acceptAfter=ImGui::GetFrameCount();
+        s.previousTab=m_ViewSectionTab;if(!Stack::Editor::IsPhotographicTab(m_ViewSectionTab))m_ViewSectionTab=Stack::Editor::LightPanelTab;s.acceptAfter=ImGui::GetFrameCount();
         s.cancel=std::make_shared<std::atomic<bool>>(false);
         m_WhiteBalancePickerArmed=false;m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();
         m_EditingRawLayerMask.reset();
@@ -172,7 +173,7 @@ void EditorModule::AdoptMaskAuthoringResult(EditorRenderWorker::PreviewResult& r
         CancelMaskAuthoring();
         if(!adjustment.empty()) {
             ActivateNodeEditorPanelTarget({m_Project->documentId,layer,adjustment});
-            SetViewSectionTab(1);m_RawSettingsPanelRequested=true;
+            if(const auto* definition=SelectedNodeEditor())SetViewSectionTab(Stack::Editor::PreferredPhotographicTab(*definition,m_ViewSectionTab));m_RawSettingsPanelRequested=true;
         }
     } catch(const std::exception& e){s.phase=Phase::Drawing;s.status=e.what();PostNotification(UiNotificationSeverity::Error,s.status,"mask-authoring");}
 }

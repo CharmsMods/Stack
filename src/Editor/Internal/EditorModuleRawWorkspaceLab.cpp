@@ -269,10 +269,12 @@ void EditorModule::CommitRawWorkspaceEditContext(
             if (!node) return;
             const auto before=node->kind==EditorNodeGraph::NodeKind::RawOperation ? node->rawOperation.parameters : node->layerParameters;
             std::string error;
+            const int editedNodeId=node->id;
             const bool prepared = context.nodeDraft
                 ? Stack::Project::WriteRawNodeDraft(candidate,*node,*context.nodeDraft,context.nodeSettings,error)
                 : Stack::Project::WriteRawLayerOperation(candidate,node->instanceUuid,context.recipe,error);
             if (prepared) {
+                node=candidate.graph.FindNode(editedNodeId);
                 const auto after=node->kind==EditorNodeGraph::NodeKind::RawOperation ? node->rawOperation.parameters : node->layerParameters;
                 auto timelineEdit=m_TimelineUi.open ? Stack::Timeline::PrepareParameterEditAnimation(m_Project->timeline,*node,Stack::Project::kProjectGraphId,
                     m_TimelineUi.currentFrame,before,after) : Stack::Timeline::ParameterEditAnimation{m_Project->timeline,{}};
@@ -309,11 +311,13 @@ void EditorModule::CommitRawWorkspaceEditContext(
             if (context.nodeTarget && Stack::Project::PrepareRawNodeEdit(m_Project->rawLayers,GetProjectDocumentId(),
                 *context.nodeTarget,context.nodeRevision,candidate,[&](auto& layer,auto& node,auto& reason) {
                     const auto before=node.kind==EditorNodeGraph::NodeKind::RawOperation ? node.rawOperation.parameters : node.layerParameters;
+                    const int editedNodeId=node.id;
                     const bool prepared=context.nodeDraft ? Stack::Project::WriteRawNodeDraft(layer,node,*context.nodeDraft,context.nodeSettings,reason)
                         : Stack::Project::WriteRawLayerOperation(layer,context.rawOperationUuid,context.recipe,reason);
                     if (prepared) {
-                        const auto after=node.kind==EditorNodeGraph::NodeKind::RawOperation ? node.rawOperation.parameters : node.layerParameters;
-                        if (m_TimelineUi.open) layer.animation=Stack::Timeline::PrepareParameterEditAnimation(layer.animation,node,layer.id,
+                        const auto& edited=*layer.graph.FindNode(editedNodeId);
+                        const auto after=edited.kind==EditorNodeGraph::NodeKind::RawOperation ? edited.rawOperation.parameters : edited.layerParameters;
+                        if (m_TimelineUi.open) layer.animation=Stack::Timeline::PrepareParameterEditAnimation(layer.animation,edited,layer.id,
                             m_TimelineUi.currentFrame,before,after).animation;
                     }
                     return prepared;

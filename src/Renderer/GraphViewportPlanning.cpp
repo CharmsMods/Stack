@@ -69,6 +69,8 @@ bool CanExecuteRegion(const RenderGraphNode& node, const std::string& socket) {
                     const auto recipe = Stack::RawRecipe::ReadGraphOperation(node.rawOperation);
                     return !Stack::RawRecipe::IsLocalRangeEnabled(recipe) && recipe.localRange.areas.empty();
                 }
+                case Stack::RawRecipe::GraphOperationKind::ColorGrade:
+                    return !Stack::RawRecipe::UsesColorWarpSpatialMasks(Stack::RawRecipe::ReadGraphOperation(node.rawOperation).colorWarp);
                 case Stack::RawRecipe::GraphOperationKind::ColorWarp:
                     return !Stack::RawRecipe::IsColorWarpEnabled(Stack::RawRecipe::ReadGraphOperation(node.rawOperation).colorWarp);
                 case Stack::RawRecipe::GraphOperationKind::DetailContrast:

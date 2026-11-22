@@ -1,3 +1,4 @@
+#include "Editor/NodeEditors/PhotographicPanelTabs.h"
 #include "App/WorkspaceInputScope.h"
 #include "Editor/NodeGraph/ChannelNodeNames.h"
 #include "Editor/EditorModule.h"
@@ -11,6 +12,8 @@
 #include "Editor/NodeEditors/PanelRoller.h"
 #include "Editor/NodeEditors/PhotographicPanelEditors.h"
 #include "Editor/NodeEditors/HslSelectionEditor.h"
+#include "Editor/NodeEditors/ToneCurveEditor.h"
+#include "Editor/NodeEditors/ToneCurveEditorState.h"
 #include "imgui_internal.h"
 #include <unordered_set>
 #include <cstdio>
@@ -314,7 +317,7 @@ void EditorModule::RenderNodeEditorPanel() {
     bool firstSection=true;
     for (auto& group:m_NodeEditorPanel.groups) {
         const auto* panelDefinition=FindPhotographicPanelEditor(group.definitionId);
-        if(!panelDefinition)continue;
+        if(!panelDefinition || !ShowPhotographicSection(*panelDefinition,m_ViewSectionTab) || (group.instances.empty() && group.definitionId=="stack:graph/raw-operation/color-grade"))continue;
         if (!firstSection) {
             ImGui::Dummy(ImVec2(0,2.f));
         }
@@ -324,7 +327,7 @@ void EditorModule::RenderNodeEditorPanel() {
         const auto selected=std::find_if(group.instances.begin(),group.instances.end(),
             [&](const auto& value){return value.key==group.selectedKey;});
         if (selected==group.instances.end()) {
-            ImGui::TextDisabled("%s",group.label.c_str());DrawMissingPanelControls(panelDefinition->panelOrder);
+            ImGui::TextDisabled("%s",group.label.c_str());DrawMissingPanelControls(panelDefinition->panelOrder,m_ViewSectionTab==ColorPanelTab);
             ImGui::PopID();continue;
         }
         auto target=selected->target;
@@ -410,6 +413,10 @@ void EditorModule::RenderNodeEditorPanel() {
                 if (visible || ownsGesture) {
                     if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
                         ActivateNodeEditorPanelTarget(target);
+                    if(definition->primary==DrawToneCurve) {
+                        auto& curve=m_NodeEditorState.Get<ToneCurveEditorState>(target);
+                        curve.photoChannel=m_ViewSectionTab==ColorPanelTab?curve.panelRgbChannel:0;
+                    }
                     RawWorkspaceEditContext context;
                     if (BeginNodeEditorContext(target,context)) {
                         context.presentation=NodeEditorPresentation::Panel;
@@ -490,7 +497,7 @@ void EditorModule::SetViewSectionPanelOpen(bool open) {
 }
 
 void EditorModule::SetViewSectionTab(int tab) {
-    tab=std::clamp(tab,0,3);
+    tab=std::clamp(tab,0,ColorPanelTab);
     if (tab==m_ViewSectionTab || Stack::Workspace::IsPreview()) return;
     if (!FinishWorkspaceInteraction()) return;
     if (m_ViewSectionTab==0 && !IsBracketingToolActive()) {
@@ -501,6 +508,11 @@ void EditorModule::SetViewSectionTab(int tab) {
             MarkRenderRefreshDirty();
         }
     }
+    if(IsPhotographicTab(tab) && IsPhotographicTab(m_ViewSectionTab)) {
+        if(m_NodeEditorPanel.lastTarget)m_NodeEditorState.EndInteraction(*m_NodeEditorPanel.lastTarget);
+        m_RawWorkspaceLabUi.ResetColorWarpAreaRequest();
+        for(auto& group:m_NodeEditorPanel.groups)group.measuredHeight=0;
+    }
     m_ViewSectionTab=tab;
     m_RawWorkspaceLabUi.settingsTabActive=tab==2;
     m_RawAssetCapture.assetsTab=tab==3;
@@ -509,7 +521,7 @@ void EditorModule::SetViewSectionTab(int tab) {
 }
 
 void EditorModule::UpdateNodeEditorPanelVisibility() {
-    const bool visible=m_ViewSectionTab==1 && m_ViewSectionOpen &&
+    const bool visible=IsPhotographicTab(m_ViewSectionTab) && m_ViewSectionOpen &&
         !IsFocusedNodeEditor() &&
         !m_PermanentGalleryWorkspace && !m_RawWorkspaceLabUi.galleryWorkspaceOpen &&
         IsViewMode() && !IsBracketingPresentationActive();

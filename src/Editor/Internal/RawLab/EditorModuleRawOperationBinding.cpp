@@ -298,6 +298,7 @@ bool EditorModule::RawStartingPointGraphSupported(std::string& reason) const {
     int next = result->id;
     for (int i=static_cast<int>(GraphOperationKind::Count)-1;i>=0;--i) {
         const auto kind = static_cast<GraphOperationKind>(i);
+        if (kind == GraphOperationKind::ColorGrade) continue; // Independently authored graph instance.
         const auto* input = layer.graph.FindInputLink(next,"imageIn");
         const auto* node = input ? layer.graph.FindNode(input->fromNodeId) : nullptr;
         if (!node || node->kind != EditorNodeGraph::NodeKind::RawOperation || node->rawOperation.kind != kind ||
@@ -329,6 +330,7 @@ RawDevelopmentRecipe EditorModule::ReadRawControlRecipe() const {
     const auto& layer = m_Project->rawLayers.State().background;
     for (int i=0; i<static_cast<int>(GraphOperationKind::Count); ++i) {
         const auto kind = static_cast<GraphOperationKind>(i);
+        if (kind == GraphOperationKind::ColorGrade) continue; // Independently authored graph instance.
         const auto selection = m_Project->rawOperationSelection.find(layer.id + "/" + GraphOperationId(kind));
         const auto* node = FindRawOperation(layer, kind,
             selection == m_Project->rawOperationSelection.end() ? std::string{} : selection->second);
@@ -354,6 +356,7 @@ bool EditorModule::PrepareRawControlRecipeEdit(const RawDevelopmentRecipe& recip
     candidate = m_Project->rawLayers.State();
     for (int i=0; i<static_cast<int>(GraphOperationKind::Count); ++i) {
         const auto kind = static_cast<GraphOperationKind>(i);
+        if (kind == GraphOperationKind::ColorGrade) continue; // Independently authored graph instance.
         auto before = MakeGraphOperation(kind), after = before;
         WriteGraphOperation(before, previous); WriteGraphOperation(after, recipe);
         // A whole-recipe exposure edit belongs to Exposure. Local EV's vertical

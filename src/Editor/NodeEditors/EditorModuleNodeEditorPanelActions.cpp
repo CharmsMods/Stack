@@ -1,4 +1,6 @@
+#include "Editor/NodeEditors/PhotographicPanelTabs.h"
 #include "Editor/EditorModule.h"
+#include "Editor/NodeEditors/ToneCurveEditor.h"
 #include "Editor/Internal/RawLab/RawLabUiSupport.h"
 #include "Project/RawLayerStack.h"
 #include <imgui.h>
@@ -18,7 +20,7 @@ void EditorModule::ResetNodeEditorPanelInstances(const std::vector<NodeEditTarge
         if (!reset) continue;
         BindNodeEditorPrimaryState(target);
         context.presentation=NodeEditorPresentation::Panel;
-        const bool changed=reset(*this,context);
+        const bool changed=reset==ResetToneCurve ? ResetPanelToneCurves(context,m_ViewSectionTab==ColorPanelTab) : reset(*this,context);
         if (changed) CommitRawWorkspaceEditContext(context,true,true);
         if (!context.error.empty()) {
             PostNotification(UiNotificationSeverity::Error,context.error,"controls-reset");
@@ -45,7 +47,8 @@ void EditorModule::RenderNodeEditorPanelMenu() {
     std::vector<NodeEditTarget> resetTargets;
     if (ImGui::BeginMenu("Reset")) {
         for (const auto& group:m_NodeEditorPanel.groups) {
-            if(!FindPhotographicPanelEditor(group.definitionId))continue;
+            const auto* definition=FindPhotographicPanelEditor(group.definitionId);
+            if(!definition || !ShowPhotographicSection(*definition,m_ViewSectionTab))continue;
             if (group.instances.empty()) continue;
             const auto* first=ResolveNodeEditorTarget(group.instances.front().target);
             const bool enabled=first && FindNodeEditor(*first).reset;

@@ -414,6 +414,14 @@ std::vector<EditorNodeGraph::SocketDefinition> BuildSockets(const EditorNodeGrap
                 "Image", false, true);
             add(EditorNodeGraph::kMaskInputSocketId, EditorNodeGraph::SocketDirection::Input, EditorNodeGraph::SocketType::Mask, "Mask", true, true);
             add("inputImageOut", EditorNodeGraph::SocketDirection::Output, EditorNodeGraph::SocketType::Image, "Operation input", false, true);
+            if(node.rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ColorWarp) {
+                const auto picks=node.rawOperation.parameters.find("hslSelections");
+                if(picks!=node.rawOperation.parameters.end())for(const auto& pick:*picks) {
+                    if(!pick.value("warpMask",false))continue;
+                    add(("area:warp-"+pick.at("id").get<std::string>()).c_str(),EditorNodeGraph::SocketDirection::Input,
+                        EditorNodeGraph::SocketType::Mask,pick.value("name",std::string("Pick")).c_str(),true,true);
+                }
+            }
             if (node.rawOperation.kind == Stack::RawRecipe::GraphOperationKind::LocalEv) {
                 for (const auto& gradient : node.rawOperation.parameters.value("evGradients", nlohmann::json::array()))
                     add(("gradient:" + gradient.at("mask").value("id", std::string{})).c_str(), EditorNodeGraph::SocketDirection::Input,

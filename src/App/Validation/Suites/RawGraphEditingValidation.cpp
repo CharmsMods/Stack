@@ -262,7 +262,7 @@ bool ValidateCanvas(EditorModule& editor, bool keyboardOnly) {
         const int outputId = sourceGraph.AddOutputNode({300, 0}, true)->id;
         require(sourceGraph.TryConnect(sourceId, outputId), "Could not connect the source document.");
         editor.DeserializePipeline(editor.SerializePipeline());
-        require(editor.GetRawLayerToolLabels() == std::vector<std::string>{"Local EV", "Tone Curve", "Color Warp"} && editor.GetRawLayerToolIndex() == 0,
+        require(editor.GetRawLayerToolLabels() == std::vector<std::string>{"Local EV", "Tone Curve", "Warp", "Grade"} && editor.GetRawLayerToolIndex() == 0,
             "A fresh Background did not select an authored tool for Alt navigation.");
         LoadCalibrationFixture(editor);
         editor.OpenRawLayerMaskGraph({});
@@ -347,7 +347,7 @@ bool ValidateCanvas(EditorModule& editor, bool keyboardOnly) {
         auto& layer=maskState.background;
         auto defaults=LayerRegistry::CreateLayer(LayerType::Saturation);
         require(defaults!=nullptr,"The Saturation definition has no default factory.");
-        const int previous=FindRawOperation(layer,Kind::ColorWarp)->id;
+        const int previous=FindRawOperation(layer,Kind::ColorGrade)->id;
         const int result=FindRawRole(layer,Role::LayerResult)->id;
         const int effect=layer.graph.AddLayerNode(LayerType::Saturation,0,{})->id;
         const auto effectUuid=layer.graph.FindNode(effect)->instanceUuid;
@@ -609,7 +609,7 @@ bool ValidateFloatingTools(EditorModule& editor, const std::filesystem::path& so
         throw std::runtime_error("View did not commit a mask node.");
     }
     LoadCalibrationFixture(editor);
-    const std::vector<std::string> defaultTools{"Local EV", "Tone Curve", "Color Calibration", "Color Warp"};
+    const std::vector<std::string> defaultTools{"Local EV", "Tone Curve", "Color Calibration", "Warp", "Grade"};
     require(editor.GetRawLayerToolLabels()==defaultTools && editor.GetRawLayerToolIndex()==0,
         "Opening a RAW image did not bind the default tools to the adopted project identity.");
     require(editor.LeaveRawWorkspaceRootTab(true) && editor.EnterRawWorkspaceRootTab(),

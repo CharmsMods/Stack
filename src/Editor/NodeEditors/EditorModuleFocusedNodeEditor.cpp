@@ -1,3 +1,4 @@
+#include "Editor/NodeEditors/PhotographicPanelTabs.h"
 #include "Editor/EditorModule.h"
 #include "App/WorkspacePresentation.h"
 #include "Editor/NodeEditors/PanelRoller.h"
@@ -62,7 +63,7 @@ void EditorModule::PresentSelectedNodeEditor() {
     if(IsFocusedNodeEditor())ExitFocusedNodeEditor();
     const auto* definition=SelectedNodeEditor();
     if(definition && definition->panelPrimary) {
-        m_ViewSectionTab=1;m_ViewSectionOpen=true;m_Project->workspace.viewPanelOpen=true;
+        m_ViewSectionTab=Stack::Editor::PreferredPhotographicTab(*definition,m_ViewSectionTab);m_ViewSectionOpen=true;m_Project->workspace.viewPanelOpen=true;
         m_RawWorkspaceLabUi.settingsTabActive=false;m_RawAssetCapture.assetsTab=false;
     } else if(definition) {
         m_ViewSectionTab=2;m_RawWorkspaceLabUi.settingsTabActive=true;m_RawAssetCapture.assetsTab=false;

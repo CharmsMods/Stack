@@ -43,7 +43,7 @@ std::size_t SelectionIdentity(const RawRecipe::RawColorWarpRecipe& recipe) {
     hash(recipe.hslSelections.size());
     for (const auto& selection : recipe.hslSelections) {
         hash(selection.id); hash(selection.enabled); hash(selection.allColors);
-        hash(selection.hue); hash(selection.hueWidth); hash(selection.hueSoftness);
+        hash(selection.hue); hash(selection.hueWidth); hash(selection.sourceChroma);hash(selection.chromaReach);hash(selection.hueSoftness);
         hash(selection.areaEnabled); hash(selection.areaSoftness); hash(selection.influence);
         for (bool own : selection.own) hash(own);
         for (const auto* bands : {&selection.bands, &selection.excludedBands}) {

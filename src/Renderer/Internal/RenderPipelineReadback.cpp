@@ -1053,6 +1053,18 @@ void RenderPipeline::CaptureRawDevelopmentStageImageReadback(
     }
 }
 
+void RenderPipeline::CaptureWarpPickMask(const std::string& id,unsigned texture,int width,int height) {
+    auto& plane=m_RawDevelopmentGraphScopeReadback.warpPickMasks.emplace_back();
+    plane.id=id;
+    const auto pixels=ReadTexturePixelsRgbaFloat(texture,width,height,plane.width,plane.height,256,"Warp pick coverage");
+    if(pixels.empty())return;
+    plane.coverage.resize(std::size_t(plane.width)*plane.height);
+    for(int y=0;y<plane.height;++y)for(int x=0;x<plane.width;++x) {
+        const float value=pixels[4*(std::size_t(plane.height-1-y)*plane.width+x)];
+        plane.coverage[std::size_t(y)*plane.width+x]=static_cast<unsigned char>(255*std::clamp(value,0.f,1.f)+.5f);
+    }
+}
+
 void RenderPipeline::CaptureRawDevelopmentGraphScopeReadback(
     RawDevelopmentGraphScopeStage stage,
     unsigned int texture,

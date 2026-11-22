@@ -1601,10 +1601,12 @@ std::array<float, 3> EvaluateColorWarpSample(
         const auto* coefficients=prepared?&prepared->globalHsl:nullptr;
         if(!coefficients){temporary=PrepareColorWarpHsl(colorWarp);coefficients=&temporary;}
         auto family=EvaluateColorWarpHsl(*coefficients,sourceHue);
-        family=ResolveHslSelections(colorWarp,coordinate,family,imagePosition,prepared?&prepared->selections:nullptr);
+        std::array<float,3> grade{};
+        family=ResolveHslSelections(colorWarp,coordinate,family,imagePosition,prepared?&prepared->selections:nullptr,&grade);
         const auto smooth=[](float x){x=std::clamp(x,0.f,1.f);return x*x*(3.f-2.f*x);};
         const float guard=smooth((chroma-.02f)/.08f)*smooth((coordinate.sceneEv+16.f)/4.f);
         const float influence=colorWarp.strength*(1.f-protection);
+        moveA+=grade[0]*influence;moveB+=grade[1]*influence;brightness+=grade[2]*influence;
         hue+=family[0]*influence*guard;
         brightness+=family[2]*influence*guard;
         familyGain=std::max(0.f,1.f+family[1]*influence*(family[1]>0?guard:1.f));

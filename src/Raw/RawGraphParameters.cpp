@@ -37,6 +37,7 @@ std::vector<GraphParameter> GraphParameters(GraphOperationKind kind) {
             add("transition", "Transition", "/luminanceTone/transitionEv", 2, .25f, 12, "EV");
             add("protection", "Outer tone protection", "/luminanceTone/outerProtection", 0, 0, 1, "ratio");
             break;
+        case GraphOperationKind::ColorGrade:
         case GraphOperationKind::ColorWarp: add("strength", "Strength", "/strength", 1, 0, 2, "ratio"); break;
         case GraphOperationKind::DetailContrast:
             add("scale", "Maximum scale", "/maximumScale", 256, 4, 2048, "source-pixels");

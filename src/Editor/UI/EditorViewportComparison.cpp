@@ -1,3 +1,4 @@
+#include "Editor/NodeEditors/PhotographicPanelTabs.h"
 #include "Editor/UI/EditorViewport.h"
 #include "Editor/UI/ViewComparisonLayout.h"
 #include "Editor/EditorModule.h"
@@ -42,7 +43,7 @@ bool EditorViewport::PrepareRawSplitComparison(EditorModule* editor, const ImVec
     }
     if (m_ShowSplitCompare || m_RawSplitProgress > 0.f) {
     const auto preferences=editor->GetRawWorkspacePresentationPreferences();
-    if(preferences.viewSectionOpen && preferences.viewSectionTab==1) m_RawComparisonAfterRight=false;
+    if(preferences.viewSectionOpen && Stack::Editor::IsPhotographicTab(preferences.viewSectionTab)) m_RawComparisonAfterRight=false;
     else {
         ImVec2 toolMin,toolMax;
         if(editor->GetRawActiveControlBounds(toolMin,toolMax)) {

@@ -17,7 +17,9 @@ inline void SanitizeHslSelections(std::vector<HslSelection>& selections) {
         }
         ids.insert(s.id);if(s.name.empty())s.name="Selection";
         s.hue=finite(s.hue,0,-180,180);s.hueWidth=finite(s.hueWidth,25,0,180);
+        s.sourceChroma=finite(s.sourceChroma,-1,-1,4);s.chromaReach=finite(s.chromaReach,.09f,.002f,4);
         s.hueSoftness=finite(s.hueSoftness,15,0,180);s.influence=finite(s.influence,1,0,2);
+        for(auto& value:s.grade)value=finite(value,0,-1,1);
         s.areaSoftness=finite(s.areaSoftness,.01f,0,.25f);
         for(auto* bands:{&s.bands,&s.excludedBands}) {
             if(bands->size()>kMaxHslBands)throw std::runtime_error("Too many HSL brightness ranges.");
@@ -36,6 +38,11 @@ inline nlohmann::json SerializeHslSelections(const std::vector<HslSelection>& se
             {"areaEnabled",s.areaEnabled},{"areaSoftness",s.areaSoftness},{"outline",s.outline},
             {"influence",s.influence},{"own",s.own},{"values",s.values}};
         const auto bands=[](const auto& list){auto a=nlohmann::json::array();for(const auto& b:list)a.push_back({b.low,b.high,b.softness});return a;};
+        if(s.sourceChroma>=0){j["sourceChroma"]=s.sourceChroma;j["chromaReach"]=s.chromaReach;}
+        if(s.warpMask)j["warpMask"]=true;
+        if(s.independentChannels)j["independentChannels"]=true;
+        if(s.neutralOnly)j["neutralOnly"]=true;
+        if(s.grade!=std::array<float,3>{})j["grade"]=s.grade;
         j["bands"]=bands(s.bands);j["excludedBands"]=bands(s.excludedBands);out.push_back(std::move(j));
     }
     return out;
@@ -46,6 +53,9 @@ inline std::vector<HslSelection> DeserializeHslSelections(const nlohmann::json& 
     for(const auto& j:list) {
         HslSelection s;s.id=j.value("id",s.id);s.name=j.value("name",s.name);s.enabled=j.value("enabled",true);
         s.hue=j.value("hue",s.hue);s.hueWidth=j.value("hueWidth",s.hueWidth);s.hueSoftness=j.value("hueSoftness",s.hueSoftness);
+        s.sourceChroma=j.value("sourceChroma",-1.f);s.chromaReach=j.value("chromaReach",.09f);s.warpMask=j.value("warpMask",false);
+        s.independentChannels=j.value("independentChannels",false);
+        s.neutralOnly=j.value("neutralOnly",false);s.grade=j.value("grade",s.grade);
         s.allColors=j.value("allColors",false);s.areaEnabled=j.value("areaEnabled",false);s.areaSoftness=j.value("areaSoftness",s.areaSoftness);
         s.outline=j.value("outline",s.outline);s.influence=j.value("influence",1.f);s.own=j.value("own",s.own);s.values=j.value("values",s.values);
         const auto bands=[](const nlohmann::json& a){

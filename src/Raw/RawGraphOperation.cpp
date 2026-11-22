@@ -10,6 +10,7 @@ const char* GraphOperationId(GraphOperationKind kind) {
         case GraphOperationKind::Exposure: return "exposure";
         case GraphOperationKind::LocalEv: return "local-ev";
         case GraphOperationKind::ToneCurve: return "tone-curve";
+        case GraphOperationKind::ColorGrade: return "color-grade";
         case GraphOperationKind::ColorWarp: return "color-warp";
         case GraphOperationKind::DetailContrast: return "detail-contrast";
         default: return "invalid";
@@ -21,7 +22,8 @@ const char* GraphOperationLabel(GraphOperationKind kind) {
         case GraphOperationKind::Exposure: return "Exposure";
         case GraphOperationKind::LocalEv: return "Local EV";
         case GraphOperationKind::ToneCurve: return "Tone Curve";
-        case GraphOperationKind::ColorWarp: return "Color Warp";
+        case GraphOperationKind::ColorGrade: return "Grade";
+        case GraphOperationKind::ColorWarp: return "Warp";
         case GraphOperationKind::DetailContrast: return "Detail Contrast";
         default: return "Unknown photo operation";
     }
@@ -54,6 +56,7 @@ RawDevelopmentRecipe ReadGraphOperation(const GraphOperation& operation) {
             break;
         }
         case GraphOperationKind::ToneCurve: recipe.finishTone.layerJson=p; break;
+        case GraphOperationKind::ColorGrade:
         case GraphOperationKind::ColorWarp: recipe.colorWarp = DeserializeColorWarpRecipe(p); break;
         case GraphOperationKind::DetailContrast: recipe.detailContrast = ReadDetailContrast(p); break;
         default: throw std::runtime_error("Unknown RAW graph operation.");
@@ -72,6 +75,7 @@ void WriteGraphOperation(GraphOperation& operation, const RawDevelopmentRecipe& 
             break;
         }
         case GraphOperationKind::ToneCurve: operation.parameters=NodeMath::CaptureToneCurveParameters(edited.finishTone.layerJson); break;
+        case GraphOperationKind::ColorGrade:
         case GraphOperationKind::ColorWarp: operation.parameters = SerializeColorWarpRecipe(edited.colorWarp); break;
         case GraphOperationKind::DetailContrast: operation.parameters = SerializeDetailContrast(edited.detailContrast); break;
         default: throw std::runtime_error("Unknown RAW graph operation.");

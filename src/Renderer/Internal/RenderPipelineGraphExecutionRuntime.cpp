@@ -196,8 +196,22 @@ void GraphExecutionRuntime::Execute() {
                     readback.sourceWidth = native.first;
                     readback.sourceHeight = native.second;
                 }
-                readback.graphInputFingerprint = fingerprintImage(
-                    graph.rawLayerScopeNodeId, graph.rawLayerScopeSocketId);
+                const auto owner=nodes.find(graph.rawLayerScopeOperationId);
+                if(owner!=nodes.end() && owner->second->kind==RenderGraphNodeKind::RawOperation &&
+                    owner->second->rawOperation.kind==Stack::RawRecipe::GraphOperationKind::ColorWarp) {
+                    const auto& params=owner->second->rawOperation.parameters;
+                    const auto picks=params.find("hslSelections");
+                    if(picks!=params.end())for(const auto& pick:*picks) {
+                        if(!pick.value("warpMask",false) || !pick.value("areaEnabled",false))continue;
+                        const auto id=pick.at("id").get<std::string>();
+                        const auto* link=executionContext.FindInputLink(graph.rawLayerScopeOperationId,"area:warp-"+id);
+                        if(link) {
+                            const auto mask=evalMask(link->fromNodeId,link->fromSocketId);
+                            pipeline.CaptureWarpPickMask(id,mask,pipeline.m_Width,pipeline.m_Height);
+                            HashCombine(readback.graphInputFingerprint,fingerprintMask(link->fromNodeId,link->fromSocketId));
+                        }
+                    }
+                }
             }
         }
     }

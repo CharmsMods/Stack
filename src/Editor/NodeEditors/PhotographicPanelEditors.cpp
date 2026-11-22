@@ -116,6 +116,7 @@ bool DrawHslPanelControls(RawWorkspaceEditContext& c) {
     if(c.recipe.colorWarp.version<5) {
         ImGui::TextDisabled("Legacy color processing");
         if(ImGui::Button("Use improved HSL")) {c.recipe.colorWarp.version=5;changed=true;}
+        if(c.presentation==NodeEditorPresentation::Panel)return changed;
     }
     auto& state=c.State<PanelControlState>();
     const char* channels[]{"Hue","Saturation","Brightness"};
@@ -181,13 +182,13 @@ bool DrawLightPanelSettings(EditorModule&,RawWorkspaceEditContext& c) {
     changed|=ImGui::Checkbox("Use region mask",&local.regionMaskEnabled);
     return changed;
 }
-void DrawMissingPanelControls(int order) {
+void DrawMissingPanelControls(int order,bool colorTab) {
     ImGui::BeginDisabled();
     const float scale=ImGui::GetFontSize()/13.f;
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,{ImGui::GetStyle().ItemSpacing.x,2.f*scale});
     const auto row=[](const char* label) {PanelRollerPlaceholder(label);};
     if(order==0) {row("Exposure");for(const auto* tone:tones)row(tone);}
-    else if(order==1) {ImGui::TextUnformatted("Luminance   R   G   B");ImGui::Dummy({0,180.f*scale});}
+    else if(order==1) {ImGui::TextUnformatted(colorTab?"Red   Green   Blue":"Luminance");ImGui::Dummy({0,180.f*scale});}
     else if(order==3) {
         const float width=ImGui::GetContentRegionAvail().x,nameWidth=48.f*scale,gap=6.f*scale;
         const float column=(width-nameWidth-gap)*.5f,start=ImGui::GetCursorScreenPos().x;

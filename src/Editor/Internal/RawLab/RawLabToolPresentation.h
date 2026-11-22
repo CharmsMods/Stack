@@ -14,7 +14,7 @@ inline const char* LabToolName(EditorModuleTypes::RawLabTool tool) {
     case Tool::Zones: return "Local exposure";
     case Tool::Tone: return "Tone curves";
     case Tool::Detail: return "Detail Contrast";
-    case Tool::Color: return "Color Warp";
+    case Tool::Color: return "Warp";
     case Tool::Calibration: return "Calibration";
     case Tool::View: return "View transform";
     case Tool::MultiFrame: return "Bracketing";

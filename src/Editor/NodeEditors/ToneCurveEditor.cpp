@@ -16,21 +16,34 @@ namespace Stack::Editor {
 namespace {
 using namespace RawLabInternal;
 
-void DrawPhotoChannels(ToneCurveEditorState& state) {
+void DrawPhotoChannels(ToneCurveEditorState& state,bool rgbOnly) {
     const auto style = GraphUI::ResolveGraphPlotStyle();
     const float side = ImGui::GetFrameHeight();
     const char* names[] = {"Luminance","Red","Green","Blue"};
-    for (int i = 0; i < 4; ++i) {
-        if (i) ImGui::SameLine(0, style.controlGap);
+    const int first=rgbOnly?1:0;
+    for (int i = first; i < 4; ++i) {
+        if (i!=first) ImGui::SameLine(0, style.controlGap);
         ImGui::PushID("PhotoChannel");
-        if (ImGui::InvisibleButton(names[i], {side, side}, ImGuiButtonFlags_EnableNav) && state.photoChannel != i) {
+        const float width=rgbOnly?std::min(ImGui::GetFontSize()*4.6f,(ImGui::GetContentRegionAvail().x-style.controlGap*(3-i))/(4-i)):side;
+        if (ImGui::InvisibleButton(names[i], {std::max(1.f,width), side}, ImGuiButtonFlags_EnableNav) && state.photoChannel != i) {
             state.EndInteraction();
             state.photoChannel = i;
+            if(i>0)state.panelRgbChannel=i;
         }
         const auto pos = ImGui::GetItemRectMin();
         const ImVec2 center{pos.x + side * .5f, pos.y + side * .5f};
         auto* draw = ImGui::GetWindowDrawList();
         const auto color = i ? style.channel[i-1] : IM_COL32_WHITE;
+        if(rgbOnly) {
+            const bool selected=state.photoChannel==i;
+            const auto high=ImGui::GetItemRectMax();
+            if(selected || ImGui::IsItemHovered())draw->AddRectFilled(pos,high,ImGui::GetColorU32(selected?ImGuiCol_Header:ImGuiCol_HeaderHovered,selected?.75f:.38f),side*.32f);
+            if(ImGui::IsItemFocused())draw->AddRect(pos,high,ImGui::GetColorU32(ImGuiCol_NavCursor),side*.32f);
+            draw->AddCircleFilled({pos.x+side*.42f,center.y},side*.13f,color);
+            draw->AddText({pos.x+side*.72f,center.y-ImGui::GetFontSize()*.5f},ImGui::GetColorU32(ImGuiCol_Text,selected?1.f:.77f),names[i]);
+            ImGui::PopID();
+            continue;
+        }
         draw->AddCircleFilled(center, side * .20f, color);
         if (state.photoChannel == i || ImGui::IsItemHovered())
             draw->AddCircle(center, side * .34f, style.curve, 0, state.photoChannel == i ? style.curveWidth : 1.f);
@@ -58,7 +71,7 @@ bool Draw(EditorModule& editor,RawWorkspaceEditContext& context,bool settings) {
         return changed;
     }
     const int previousChannel=state.photoChannel;
-    if (!settings) DrawPhotoChannels(state);
+    if (!settings && (!panel || state.photoChannel!=0)) DrawPhotoChannels(state,panel);
     // Input analysis was prepared before the channel button. Wait for its
     // matching domain on the next frame before displaying or fitting it.
     if(previousChannel!=state.photoChannel)context.inputHistogram.valid=false;
@@ -79,14 +92,14 @@ bool Draw(EditorModule& editor,RawWorkspaceEditContext& context,bool settings) {
     int& activeChannel = state.photoChannel;
     if (settings) {
         int domain=parameters.value("domain",0);
-        if(panel) {
+        if(panel && activeChannel!=0) {
             ImGui::TextUnformatted("Curve values");
             if(ImGui::RadioButton("Linear",domain==0)) {parameters["domain"]=0;domain=0;changed=true;}
             ImGui::SameLine();
             if(ImGui::RadioButton("Exposure stops",domain==1)) {parameters["domain"]=1;domain=1;changed=true;}
-        } else if (ImGui::Combo("Curve values",&domain,"Linear values\0Exposure stops (positive values)\0")) {parameters["domain"]=domain;changed=true;}
+        } else if (!panel && ImGui::Combo("Curve values",&domain,"Linear values\0Exposure stops (positive values)\0")) {parameters["domain"]=domain;changed=true;}
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Changes how channel curves affect the image. The graph initially fits the image's tonal range; zooming only changes the view.");
-        if (domain==1) {
+        if (domain==1 && (!panel || activeChannel!=0)) {
             float low=parameters.at("logMinEv"),high=parameters.at("logMaxEv"),grey=parameters.at("middleGrey");
             if (ImGui::InputFloat("Minimum EV",&low) && low<high) {parameters["logMinEv"]=low;changed=true;}
             if (ImGui::InputFloat("Maximum EV",&high) && high>low) {parameters["logMaxEv"]=high;changed=true;}
@@ -151,6 +164,20 @@ bool Draw(EditorModule& editor,RawWorkspaceEditContext& context,bool settings) {
 }
 bool DrawToneCurve(EditorModule& editor,RawWorkspaceEditContext& context) {return Draw(editor,context,false);}
 bool DrawToneCurveSettings(EditorModule& editor,RawWorkspaceEditContext& context) {return Draw(editor,context,true);}
+bool ResetPanelToneCurves(RawWorkspaceEditContext& context,bool rgb) {
+    auto& parameters=context.recipe.finishTone.layerJson;
+    const auto defaults=NodeMath::DefaultToneCurveParameters();
+    if(!rgb)parameters["luminanceTone"]=defaults.at("luminanceTone");
+    else for(int i=1;i<=3;++i) {
+        const auto channel=static_cast<RawRecipe::RawPointCurveChannel>(i);
+        const auto component=RawRecipe::PointCurveComponentFromFinishToneJson(defaults,channel);
+        RawRecipe::StorePointCurveComponentInFinishToneJson(parameters,channel,component);
+        const auto key=RawRecipe::RawPointCurveChannelKey(channel);
+        parameters["curveAmounts"][key]=defaults.at("curveAmounts").at(key);
+    }
+    context.State<ToneCurveEditorState>().EndInteraction();
+    return true;
+}
 bool ResetToneCurve(EditorModule&,RawWorkspaceEditContext& context) {
     context.recipe.finishTone.layerJson=NodeMath::DefaultToneCurveParameters();
     auto& state=context.State<ToneCurveEditorState>();

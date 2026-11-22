@@ -59,22 +59,33 @@ bool ToneStrip(HslSelection& s,HslSelectionEditorState& state,std::uint64_t revi
     return changed;
 }
 }
-bool HslNeedsAnalysis(const HslSelectionEditorState& state) {return !state.selected.empty() && (state.tool==HslImageTool::Sample || state.tool==HslImageTool::Exclude || state.preview!=0);}
-bool DrawHslSelections(RawWorkspaceEditContext& context) {
-    auto& recipe=context.recipe.colorWarp;auto& state=context.State<HslSelectionEditorState>();bool changed=false;
-    if(!context.canEdit){state.EndInteraction();return false;}
+bool HslNeedsAnalysis(const HslSelectionEditorState& state) {return !state.selected.empty() && (state.tool==HslImageTool::Sample || state.tool==HslImageTool::Exclude || state.preview!=0 || (ImGui::IsKeyDown(ImGuiKey_H) && !ImGui::GetIO().WantTextInput));}
+bool CommitHslImagePick(RawWorkspaceEditContext& context) {
+    auto& state=context.State<HslSelectionEditorState>();
+    if(!state.pending || !context.canEdit)return false;
+    bool changed=false;
+    auto& recipe=context.recipe.colorWarp;
     const auto find=[&](){return std::find_if(recipe.hslSelections.begin(),recipe.hslSelections.end(),[&](const auto& s){return s.id==state.selected;});};
     if(state.pending) {
         const auto found=find();
         if(found!=recipe.hslSelections.end() && state.draft && state.draft->id==found->id && state.gestureRevision==context.nodeRevision) {
             // Only selection fields come from image gestures; retain any edits
             // made to the adjustment while the gesture was active.
+            found->sourceChroma=state.draft->sourceChroma;found->chromaReach=state.draft->chromaReach;found->warpMask=state.draft->warpMask;
+            found->neutralOnly=state.draft->neutralOnly;found->allColors=state.draft->allColors;
             found->hue=state.draft->hue;found->hueWidth=state.draft->hueWidth;
             found->bands=std::move(state.draft->bands);found->excludedBands=std::move(state.draft->excludedBands);
             found->outline=std::move(state.draft->outline);found->areaEnabled=state.draft->areaEnabled;changed=true;
         }else state.status="The edit changed before the selection finished. Draw it again.";
         state.pending=false;state.draft.reset();state.profileRevision=~std::uint64_t(0);
     }
+    return changed;
+}
+bool DrawHslSelections(RawWorkspaceEditContext& context) {
+    auto& recipe=context.recipe.colorWarp;auto& state=context.State<HslSelectionEditorState>();bool changed=false;
+    if(!context.canEdit){state.EndInteraction();return false;}
+    const auto find=[&](){return std::find_if(recipe.hslSelections.begin(),recipe.hslSelections.end(),[&](const auto& s){return s.id==state.selected;});};
+    changed|=CommitHslImagePick(context);
     if(state.reveal.IsActive())state.reveal.Advance(ImGui::GetIO().DeltaTime,Notifications::SystemReducedMotion());
     ImGui::Spacing();ImGui::TextDisabled("SELECTIONS");ImGui::SameLine();
     ImGui::BeginDisabled(recipe.version<5 || recipe.hslSelections.size()>=kMaxHslSelections);

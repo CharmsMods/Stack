@@ -1,3 +1,4 @@
+#include "Editor/NodeEditors/PhotographicPanelTabs.h"
 #include "Editor/EditorModule.h"
 #include "Utils/HoverTextScope.h"
 #include "App/AppHeaderStyle.h"
@@ -68,24 +69,30 @@ void EditorModule::RenderRawWorkspaceSectionPanel(
             const bool bracketSource=IsBracketingToolActive();
             const auto tabButton=[&](const char* label,int tab) {
                 if (ImGui::GetCursorPosX()>14.f*unit &&
-                    ImGui::GetCursorPosX()+ImGui::CalcTextSize(label).x+16.f*unit>size.x-14.f*unit-(m_ViewSectionTab==1 ? 26.f*unit : 0.f))
+                    ImGui::GetCursorPosX()+ImGui::CalcTextSize(label).x+16.f*unit>size.x-14.f*unit-(Stack::Editor::IsPhotographicTab(m_ViewSectionTab) ? 26.f*unit : 0.f))
                     ImGui::NewLine();
-                if (BareToolIslandButton(label,m_ViewSectionTab==tab) && !PickingMaskDestination())
-                    SetViewSectionTab(tab==1 && m_ViewSectionTab==1 ? 0 : tab);
+                const bool active=m_ViewSectionTab==tab;
+                if (BareToolIslandButton(label,active) && (!PickingMaskDestination() || Stack::Editor::IsPhotographicTab(tab)))
+                    SetViewSectionTab(Stack::Editor::IsPhotographicTab(tab) && m_ViewSectionTab==tab && !PickingMaskDestination() ? 0 : tab);
+                if(active) {
+                    const auto lo=ImGui::GetItemRectMin(),hi=ImGui::GetItemRectMax();
+                    ImGui::GetWindowDrawList()->AddLine({lo.x+6.f*unit,hi.y-unit},{hi.x-6.f*unit,hi.y-unit},ImGui::GetColorU32(ImGuiCol_Text,.75f),1.5f*unit);
+                }
             };
             tabButton(bracketSource ? "Source" : "Interpretation",0);
-            ImGui::SameLine(0,8.f*unit);tabButton("Light",1);
+            ImGui::SameLine(0,8.f*unit);tabButton("Light",Stack::Editor::LightPanelTab);
+            ImGui::SameLine(0,8.f*unit);tabButton("Color",Stack::Editor::ColorPanelTab);
             if (!bracketSource) { ImGui::SameLine(0,8.f*unit);tabButton("Settings",2); }
             ImGui::SameLine(0,8.f*unit);tabButton("Assets",3);
-            if (m_ViewSectionTab==1) {
+            if (Stack::Editor::IsPhotographicTab(m_ViewSectionTab) && !PickingMaskDestination()) {
                 ImGui::SameLine();
                 ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(),size.x-38.f*unit));
                 RenderNodeEditorPanelMenu();
             }
             ImGui::Spacing();
-            const bool controls=m_ViewSectionTab==1;
+            const bool controls=Stack::Editor::IsPhotographicTab(m_ViewSectionTab);
             const bool settings = !bracketSource && m_ViewSectionTab==2;
-            ImGui::PushID(m_ViewSectionTab==3 ? "Assets" : controls ? "Controls" : bracketSource ? "Source" : settings ? "Settings" : "Interpretation");
+            ImGui::PushID(m_ViewSectionTab==3 ? "Assets" : m_ViewSectionTab==Stack::Editor::ColorPanelTab ? "ColorControls" : controls ? "Controls" : bracketSource ? "Source" : settings ? "Settings" : "Interpretation");
             if (settings) ImGui::PushID(static_cast<int>(m_RawWorkspaceLabUi.activeTool));
             const bool bodyVisible=controls ? Stack::Editor::BeginControlsPanelBody(visibleWidth < size.x - 0.5f) :
                 ImGui::BeginChild("PanelBody", ImVec2(0, 0), ImGuiChildFlags_None,ImGuiWindowFlags_NoBackground);
@@ -131,7 +138,7 @@ void EditorModule::RequestRawSettingsPanel() {
     ExitFocusedNodeEditor();
     if(const auto* editor=SelectedNodeEditor();editor && editor->panelPrimary && m_Project->nodeEditor) {
         m_NodeEditorState.Get<Stack::Editor::PanelControlState>(*m_Project->nodeEditor).settingsOpen=true;
-        SetViewSectionTab(1);m_RawSettingsPanelRequested=true;return;
+        SetViewSectionTab(Stack::Editor::PreferredPhotographicTab(*editor,m_ViewSectionTab));m_RawSettingsPanelRequested=true;return;
     }
     SetViewSectionTab(2);
     m_RawSettingsPanelRequested = true;

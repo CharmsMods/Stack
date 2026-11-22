@@ -114,7 +114,13 @@ enum class RawDevelopmentGraphScopeStage {
     ColorWarpInput = 3
 };
 
+struct WarpPickMaskReadback {
+    std::string id;
+    int width=0,height=0;
+    std::vector<unsigned char> coverage;
+};
 struct RawDevelopmentGraphScopeReadback {
+    std::vector<WarpPickMaskReadback> warpPickMasks;
     bool valid = false;
     // Actual incoming content, including standalone Color Warp recipe stages.
     // Zero means the producer did not provide a content identity.
@@ -1081,7 +1087,7 @@ private:
         GraphNodeRenderResult& result,
         const Stack::RawRecipe::RawDevelopmentRecipe& recipe,
         std::size_t inputFingerprint, int sourceWidth, int sourceHeight,
-        const Raw::ViewportRegion& inputRegion);
+        const Raw::ViewportRegion& inputRegion, const std::array<unsigned int,16>* pickMasks=nullptr);
     void ApplyRawViewportRegion(GraphNodeRenderResult& result,
         const Stack::RawRecipe::RawDevelopmentRecipe& recipe, Raw::ViewportStage stage,
         std::size_t upstreamFingerprint, int nodeId);
@@ -1181,6 +1187,7 @@ private:
         const std::string& measurementDomain,
         bool sceneLinearBeforeViewTransform,
         bool displayMappedLinearRgb);
+    void CaptureWarpPickMask(const std::string& id,unsigned texture,int width,int height);
     void CaptureRawDevelopmentGraphScopeReadback(
         RawDevelopmentGraphScopeStage stage,
         unsigned int texture,

@@ -24,7 +24,8 @@ RawAdjustmentLayer MakeRawLayer(std::string id, std::string name) {
     const std::vector<RawRecipe::GraphOperationKind> initial = layer.id == kRawBackgroundId
         ? std::vector<RawRecipe::GraphOperationKind>{RawRecipe::GraphOperationKind::LocalEv,
             RawRecipe::GraphOperationKind::ToneCurve,
-            RawRecipe::GraphOperationKind::ColorWarp}
+            RawRecipe::GraphOperationKind::ColorWarp,
+            RawRecipe::GraphOperationKind::ColorGrade}
         : std::vector<RawRecipe::GraphOperationKind>{};
     int position = 1;
     for (auto kind : initial) {
