@@ -71,10 +71,10 @@ ImVec4 BranchColor(unsigned index) {
     return colors[index%6];
 }
 }
-GalleryFilesystemBrowser::GalleryFilesystemBrowser():state_(std::make_shared<State>()) {}
 GalleryFilesystemBrowser::~GalleryFilesystemBrowser(){state_->closed.store(true);state_->motion.Stop();if(state_->searchIndex)state_->searchIndex->Suspend();state_->ReleasePreviews();}
 std::optional<std::filesystem::path> GalleryFilesystemBrowser::Render(const std::filesystem::path& current) {
     auto& s=*state_;s.Start(state_);
+    s.hit={};s.dropFolder.clear();
     if(!s.motion.Active())s.navigationTile={};
     if(s.current!=current)s.Navigate(current);
     if(s.directory && !s.directory->loaded && !s.directory->pending && s.directory->error.empty())s.Request(state_,s.directory);
@@ -107,8 +107,10 @@ std::optional<std::filesystem::path> GalleryFilesystemBrowser::Render(const std:
     if(ImGui::Button("##FolderTools",{28*unit,28*unit}))ImGui::OpenPopup("FolderTools");
     const auto toolsMin=ImGui::GetItemRectMin();
     LibraryUi::DrawIcon(LibraryUi::Icon::MoreHorizontal,{toolsMin.x+6*unit,toolsMin.y+6*unit},16*unit,ImGui::GetColorU32(ImGuiCol_Text));
-    if(ImGui::IsItemHovered())ImGui::SetTooltip("Folder navigation options");
+    if(ImGui::IsItemHovered())ImGui::SetTooltip("Folder actions and history");
     if(ImGui::BeginPopup("FolderTools")) {
+        RenderFileHistory();
+        ImGui::Separator();
         if(ImGui::MenuItem("Show current folder",nullptr,false,!current.empty())) {
             s.filter[0]=0;s.FilterChanged();s.revealRequested=true;s.scrollToCurrent=true;
         }
@@ -165,7 +167,9 @@ std::optional<std::filesystem::path> GalleryFilesystemBrowser::Render(const std:
     if(ImGui::InputTextWithHint("##SearchFolders",current.empty()?"Search drives":"Search images and folders",s.search,sizeof(s.search)))s.SearchChanged();
     if(ImGui::IsItemHovered())ImGui::SetTooltip(current.empty()?"Filter drives by name or letter":"Search names in this folder and all subfolders. Small spelling mistakes are tolerated. Ctrl-scroll resizes thumbnails.");
     ImGui::SameLine();
+    ImGui::BeginDisabled(FileOperationBusy());
     if(ImGui::Button("##CloseBrowser",{28*unit,28*unit}))s.closeRequested=true;
+    ImGui::EndDisabled();
     const auto closeMin=ImGui::GetItemRectMin();
     auto* closeDraw=ImGui::GetWindowDrawList();
     const auto closeColor=ImGui::GetColorU32(ImGuiCol_Text);
@@ -177,6 +181,7 @@ std::optional<std::filesystem::path> GalleryFilesystemBrowser::Render(const std:
         if(ImGui::InputTextWithHint("##FilterFolders","Filter loaded folders",s.filter,sizeof(s.filter)))s.FilterChanged();
         if(ImGui::IsItemHovered())ImGui::SetTooltip("Filters folder names already loaded in this tree. Clear to restore your expanded branches.");
     }
+    RenderFileStatus();
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,{0,0});
     const float rowHeight=32*unit;
     const float bodyHeight=std::max(1.f,ImGui::GetContentRegionAvail().y);
@@ -185,6 +190,12 @@ std::optional<std::filesystem::path> GalleryFilesystemBrowser::Render(const std:
         for(const auto& shortcut:s.shortcuts) {
             ImGui::PushID(shortcut.get());const auto pos=ImGui::GetCursorScreenPos();
             if(ImGui::Selectable("##Shortcut",s.currentKey==shortcut->key,0,{0,rowHeight}))selected=shortcut->path;
+            if (FolderDropTarget(shortcut->path, ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)))
+                ImGui::GetWindowDrawList()->AddRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), ImGui::GetColorU32(ImGuiCol_HeaderActive));
+            if (!s.rightDrag.Active() && ImGui::BeginPopupContextItem("ShortcutOptions")) {
+                RenderFolderCommands(shortcut->path);
+                ImGui::EndPopup();
+            }
             LocationIcon(shortcut->kind,false,{pos.x+8*unit,pos.y+8*unit},16*unit,ImGui::GetColorU32(ImGuiCol_TextDisabled));
             ImGui::GetWindowDrawList()->AddText({pos.x+34*unit,pos.y+8*unit},ImGui::GetColorU32(ImGuiCol_Text),shortcut->label.c_str());
             ImGui::PopID();
@@ -218,7 +229,7 @@ std::optional<std::filesystem::path> GalleryFilesystemBrowser::Render(const std:
                     {origin.x+width-6*unit,origin.y+rowHeight},origin.x+width-6*unit,text,nullptr,nullptr);
                 ImGui::PopStyleColor();
                 if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",node.error.empty()?text:node.error.c_str());
-                if(ImGui::BeginPopupContextItem("Retry")) {
+                if(!s.rightDrag.Active() && ImGui::BeginPopupContextItem("Retry")) {
                     if(ImGui::MenuItem("Retry listing"))s.Request(state_,row.node);
                     ImGui::EndPopup();
                 }
@@ -239,14 +250,18 @@ std::optional<std::filesystem::path> GalleryFilesystemBrowser::Render(const std:
             ImGui::PopStyleColor(3);
             const bool hovered=ImGui::IsItemHovered();
             const bool focused=ImGui::IsItemFocused();
+            if (FolderDropTarget(node.path, ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)))
+                ImGui::GetWindowDrawList()->AddRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), ImGui::GetColorU32(ImGuiCol_HeaderActive));
             if(focused && s.filterKey.empty()) {
                 if(expandable && ImGui::IsKeyPressed(ImGuiKey_RightArrow)) {node.expanded=true;s.dirty=true;if(!node.loaded)s.Request(state_,row.node);}
                 if(ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) {node.expanded=false;s.dirty=true;s.revealRequested=false;s.scrollToCurrent=false;}
             }
             const bool tooltip=ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal);
-            if(ImGui::BeginPopupContextItem("FolderOptions")) {
+            if(!s.rightDrag.Active() && ImGui::BeginPopupContextItem("FolderOptions")) {
                 if(ImGui::MenuItem("Open folder"))selected=node.path;
                 if(ImGui::MenuItem("Refresh folders",nullptr,false,!node.pending))s.Request(state_,row.node);
+                ImGui::Separator();
+                RenderFolderCommands(node.path);
                 ImGui::EndPopup();
             }
             auto* draw=ImGui::GetWindowDrawList();
@@ -281,7 +296,8 @@ std::optional<std::filesystem::path> GalleryFilesystemBrowser::Render(const std:
     }
     ImGui::EndChild();
     ImGui::SameLine(0,10*unit);
-    if(selected)s.motion.Stop();
+    if (selected) { s.motion.Stop(); s.navigationTile = {}; }
+    if (FileOperationBusy()) selected.reset();
     if(s.resetGridScroll){ImGui::SetNextWindowScroll({0,s.directory?s.directory->gridScroll:0});s.resetGridScroll=false;}
     if(ImGui::BeginChild("FolderTiles",{0,bodyHeight},false,ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar)) {
         if(ImGui::IsWindowHovered() && ImGui::GetIO().KeyCtrl) {
@@ -292,15 +308,16 @@ std::optional<std::filesystem::path> GalleryFilesystemBrowser::Render(const std:
         s.gridBounds=ImGui::GetCurrentWindow()->InnerClipRect;
         s.motion.Begin(s.gridBounds,!s.locateReturn && ((!s.directory && !s.rootsPending) || (s.directory && s.directory->loaded && !s.directory->pending)),LibraryUi::ReducedMotion());
         if(s.directory && !s.directory->error.empty())s.motion.Stop();
-        const int firstVertex=ImGui::GetWindowDrawList()->VtxBuffer.Size;
+        auto* gridDraw = ImGui::GetWindowDrawList();
+        s.motion.DrawUnder(*gridDraw);
         ImGui::PushStyleVar(ImGuiStyleVar_DisabledAlpha,1.f);
-        ImGui::BeginDisabled(s.motion.Active());
+        ImGui::BeginDisabled(s.motion.Active() || FileOperationBusy());
         RenderTiles(selected);
         ImGui::EndDisabled();
+        if (!s.motion.Active() && !selected) FinishGridInput();
+        else s.CancelGridInput(false);
         ImGui::PopStyleVar();
-        s.motion.Finish(ImGui::GetWindowDrawList(),firstVertex);
-        if(selected && !s.motion.Active() && !s.current.empty() && *selected==s.current.parent_path())
-            s.motion.Capture(ImGui::GetWindowDrawList(),s.gridBounds);
+        s.motion.DrawOver(*gridDraw);
         if(s.directory)s.directory->gridScroll=ImGui::GetScrollY();
         if(!s.motion.Active())RenderGalleryBrowserScroll(unit);
     }

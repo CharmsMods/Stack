@@ -3357,7 +3357,11 @@ EditorRenderWorker::Result EditorRenderWorker::RenderSnapshot(const Snapshot& sn
                     return result;
                 }
             }
-            pipeline.ExecuteGraph(snapshot.graph);
+            if (snapshot.rawRenderPurpose == RawRenderPurpose::InteractivePresentation &&
+                snapshot.rawWorkspace.openingExposureOperationId > 0) {
+                result.openingExposureEv = pipeline.ExecuteGraphWithOpeningExposureProbe(
+                    snapshot.graph, snapshot.rawWorkspace.openingExposureOperationId);
+            } else pipeline.ExecuteGraph(snapshot.graph);
             // Keep the main image's completion state immutable: previews,
             // candidates and overview coverage may execute other graphs.
             result.denoisePending = pipeline.IsOutputDenoisePending();

@@ -2,6 +2,7 @@
 #include "Project/RawLayerStack.h"
 #include "Raw/Bracketing/Processor.h"
 #include "Raw/RawColorTransform.h"
+#include "Raw/RawOpeningExposure.h"
 #include <algorithm>
 #include <cmath>
 
@@ -63,9 +64,9 @@ bool Corroborated(const Preview& p, const BracketingRecipe& recipe, std::size_t 
     return false;
 }
 
-float CredibleWhiteEv(const Preview& p,const BracketingRecipe& recipe) {
+RawExposure::OpeningLuminance MeasureBracketLuminance(const Preview& p,const BracketingRecipe& recipe) {
     const auto pixels=std::size_t(p.width)*p.height;
-    if (!pixels || p.diagnostics.size()!=pixels || p.resultRgb.size()!=pixels*3) return 0;
+    if (!pixels || p.diagnostics.size()!=pixels || p.resultRgb.size()!=pixels*3) return {};
     Raw::RawDevelopSettings settings;
     settings.workingSpace=Raw::RawWorkingSpace::LinearRec2020D65;
     const auto wb=Raw::ResolveRawWhiteBalance(p.metadata,settings);
@@ -83,14 +84,11 @@ float CredibleWhiteEv(const Preview& p,const BracketingRecipe& recipe) {
         if ((p.diagnostics[i]&(Preview::Fallback|Preview::Invalid)) && !Corroborated(p,recipe,i,weights,y)) continue;
         values.push_back(float(y));
     }
-    if (values.size()<128) return 0;
-    const auto white=values.begin()+((values.size()-1)*99)/100;
-    std::nth_element(values.begin(),white,values.end());
-    return std::log2(*white/.18f);
+    return RawExposure::MeasureOpeningLuminance(values);
 }
 }
 
-bool FitBracketStartingCurve(RawLayerStackState& state,const BracketingResult& result,const BracketingRecipe& recipe) {
+bool FitBracketStartingAdjustments(RawLayerStackState& state,const BracketingResult& result,const BracketingRecipe& recipe) {
     if (result.panorama || !result.analysis || !HasExposureBracket(recipe,*result.analysis) ||
         state.explicitRouting || !state.layers.empty() || !state.background.enabled ||
         state.background.opacity!=1 || state.background.layerMask) return false;
@@ -102,10 +100,36 @@ bool FitBracketStartingCurve(RawLayerStackState& state,const BracketingResult& r
         if (!IsUntouchedOperation(node.rawOperation)) return false;
     }
     auto* tone=FindRawOperation(state.background,RawRecipe::GraphOperationKind::ToneCurve);
+    const auto* exposure=FindRawOperation(state.background,RawRecipe::GraphOperationKind::LocalEv);
     if (!tone) return false;
-    const float white=CredibleWhiteEv(result.preview,recipe);
+    const auto light=MeasureBracketLuminance(result.preview,recipe);
+    if (!(light.white>0.f)) return false;
     constexpr float knee=1.f, target=2.5f;
-    if (!(white>target+.15f)) return false;
+    const float whiteEv=std::log2(light.white/.18f);
+    const bool fitCurve=whiteEv>target+.15f;
+    // A fitted curve puts credible white at the target even after the lift.
+    // Otherwise keep the lifted value below the range that calls for a fit.
+    const float whiteLimit=fitCurve ? light.white*2.f : .18f*std::exp2(target+.15f);
+    const auto* current=FindRawRole(state.background,GraphModel::NodeRole::CurrentImage);
+    const auto& graph=state.background.graph;
+    const auto* input=exposure ? graph.FindInputLink(exposure->id) : nullptr;
+    const bool pristineExposure=input && current && input->fromNodeId==current->id &&
+        std::none_of(graph.GetLinks().begin(),graph.GetLinks().end(),[&](const auto& link) {
+            return link.toNodeId==exposure->id && link.toSocketId!=EditorNodeGraph::kImageInputSocketId;
+        });
+    const float lift=pristineExposure ? RawExposure::EstimateOpeningEv(light,whiteLimit) : 0.f;
+    if (!fitCurve && lift<=0.f) return false;
+    const auto toneId=tone->instanceUuid;
+    std::string error;
+    if (lift>0.f) {
+        const auto exposureId=exposure->instanceUuid;
+        auto edited=RawRecipe::ReadGraphOperation(exposure->rawOperation);
+        edited.preToneExposureEv=lift;
+        if (!WriteRawLayerOperation(state.background,exposureId,edited,error)) return false;
+    }
+    if (!fitCurve) return true;
+    // Full gain is a conservative bound for the protected Local EV shoulder.
+    const float white=whiteEv+lift;
     // Place regional scene white below Sigmoid's crowded upper shoulder, while
     // local contrast preserves detail around that base. Leave lower regional
     // bases at their original exposure and keep a positive specular tail.
@@ -120,10 +144,11 @@ bool FitBracketStartingCurve(RawLayerStackState& state,const BracketingResult& r
         const float mapped=ev<=knee?ev:(ev>white?target+(ev-white)*tailSlope:knee+distance/(1+a*distance));
         curve.curve.push_back({(ev+16)/32,(mapped+16)/32});
     }
-    auto edited=RawRecipe::ReadGraphOperation(tone->rawOperation);
+    const auto* curveNode=FindRawOperation(state.background,RawRecipe::GraphOperationKind::ToneCurve,toneId);
+    if (!curveNode) return false;
+    auto edited=RawRecipe::ReadGraphOperation(curveNode->rawOperation);
     edited.finishTone.layerJson["curveMode"]="luminance";
     edited.finishTone.layerJson["luminanceTone"]=RawRecipe::SerializeSceneTone(curve);
-    std::string error;
-    return WriteRawLayerOperation(state.background,tone->instanceUuid,edited,error);
+    return WriteRawLayerOperation(state.background,toneId,edited,error);
 }
 }

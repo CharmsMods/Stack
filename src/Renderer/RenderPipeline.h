@@ -408,6 +408,8 @@ public:
         return m_RawViewportGpuTiming.Collect(canceled);
     }
     unsigned int GetOutputTexture() const { return m_OutputTexture; }
+    // Render-worker-only probe of a Local EV node's scene-linear input.
+    float ExecuteGraphWithOpeningExposureProbe(const RenderGraphSnapshot&, int operationId);
     // Provenance of the selected graph output, independent of other jobs or
     // auxiliary outputs that happen to share this pipeline.
     bool IsOutputDenoisePending() const { return m_OutputTexture != 0 && m_OutputDenoisePending; }
@@ -708,6 +710,9 @@ private:
     unsigned int m_PingFBO;
     unsigned int m_PongFBO;
     unsigned int m_OutputTexture;   // Points to whichever is the final result
+    int m_OpeningExposureProbeOperation = 0;
+    float m_OpeningExposureProbeEv = 0.f;
+    float MeasureOpeningExposure(unsigned int texture, Raw::RawWorkingSpace workingSpace);
     bool m_OutputDenoisePending = false;
     unsigned int m_ExternalOutputTexture;
     unsigned int m_GraphSourceTexture;

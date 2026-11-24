@@ -466,6 +466,7 @@ public:
         int managedRawDecodeNodeId = -1;
         int managedToneCurveNodeId = -1;
         int managedViewTransformNodeId = -1;
+        int openingExposureOperationId = 0;
         std::string localRangeOverlayMode;
         Raw::ViewportRequest viewport;
         Raw::ViewportStage editStage = Raw::ViewportStage::RawBase;
@@ -611,6 +612,7 @@ public:
         RawRenderTelemetry telemetry;
         int previewMaxDimension = 0;
         RawWorkspaceResult rawWorkspace;
+        std::optional<float> openingExposureEv;
         Stack::Renderer::ViewportPreviewRequest viewportPreview;
         Stack::Renderer::ViewportPreviewGeometry viewportPreviewGeometry;
         int viewportViewId = 0;

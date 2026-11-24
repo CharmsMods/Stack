@@ -32,6 +32,7 @@ struct ProjectWorkspace {
     ProjectLoadTransition loadTransition;
     Stack::Renderer::GalleryTransitionOrigin galleryOrigin;
     std::uint64_t galleryOpenIntent = 0;
+    std::uint64_t galleryTileLoaderIntent = 0;
     bool galleryOpening = false;
     bool galleryBracket = false;
     bool galleryArrivalPending = false;

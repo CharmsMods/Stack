@@ -1,6 +1,7 @@
 #include "Renderer/RenderPipeline.h"
 #include "Renderer/GLHelpers.h"
 #include "Renderer/GLStateGuards.h"
+#include "Raw/RawOpeningExposure.h"
 #include "Utils/PixelBufferUtils.h"
 #include <algorithm>
 #include <array>
@@ -157,7 +158,8 @@ std::vector<float> ReadTexturePixelsRgbaFloat(
     int& outW,
     int& outH,
     int maxDimension,
-    const char* context) {
+    const char* context,
+    bool openingProbe = false) {
     outW = 0;
     outH = 0;
     if (texture == 0 || sourceWidth <= 0 || sourceHeight <= 0) {
@@ -241,9 +243,32 @@ std::vector<float> ReadTexturePixelsRgbaFloat(
             probeFbo != 0 ? probeFbo : readFbo);
         glReadBuffer(GL_COLOR_ATTACHMENT0);
         while (glGetError() != GL_NO_ERROR) {}
-        glReadPixels(
-            0, 0, outW, outH,
-            GL_RGBA, GL_FLOAT, pixels.data());
+        if (openingProbe) {
+            unsigned int pbo = 0;
+            glGenBuffers(1, &pbo);
+            if (pbo) {
+                glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo);
+                glBufferData(GL_PIXEL_PACK_BUFFER, elementCount * sizeof(float), nullptr, GL_STREAM_READ);
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
+                glReadPixels(0, 0, outW, outH, GL_RGBA, GL_FLOAT, nullptr);
+                const auto fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+                ready = false;
+                if (fence) {
+                    const auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        deadline - std::chrono::steady_clock::now()).count();
+                    if (remaining > 0) {
+                        const auto status = glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, remaining);
+                        ready = (status == GL_ALREADY_SIGNALED || status == GL_CONDITION_SATISFIED) &&
+                            std::chrono::steady_clock::now() <= deadline;
+                        if (ready) glGetBufferSubData(GL_PIXEL_PACK_BUFFER, 0, elementCount * sizeof(float), pixels.data());
+                    }
+                    glDeleteSync(fence);
+                }
+                glDeleteBuffers(1, &pbo);
+            } else ready = false;
+        } else {
+            glReadPixels(0, 0, outW, outH, GL_RGBA, GL_FLOAT, pixels.data());
+        }
         if (const GLenum error = glGetError();
             error != GL_NO_ERROR) {
             std::cerr
@@ -267,6 +292,27 @@ std::vector<float> ReadTexturePixelsRgbaFloat(
     return pixels;
 }
 } // namespace
+
+float RenderPipeline::MeasureOpeningExposure(unsigned int texture, Raw::RawWorkingSpace workingSpace) {
+    try {
+        int width = 0, height = 0;
+        const auto pixels = ReadTexturePixelsRgbaFloat(texture, m_Width, m_Height,
+            width, height, 128, "RAW opening exposure", true);
+        const bool rec2020 = workingSpace == Raw::RawWorkingSpace::LinearRec2020D65;
+        const std::array<float, 3> weights = rec2020 ? std::array{.2627002f, .6779981f, .0593017f} :
+            std::array{.2126729f, .7151522f, .0721750f};
+        std::vector<float> samples;
+        samples.reserve(pixels.size() / 4);
+        for (std::size_t i = 0; i < pixels.size(); i += 4) {
+            if (!(pixels[i + 3] > 0.f)) continue;
+            const float luma = pixels[i] * weights[0] + pixels[i + 1] * weights[1] + pixels[i + 2] * weights[2];
+            if (luma > 0.f && std::isfinite(luma)) samples.push_back(luma);
+        }
+        return Stack::RawExposure::EstimateOpeningEv(Stack::RawExposure::MeasureOpeningLuminance(samples));
+    } catch (const std::bad_alloc&) {
+        return 0.f;
+    }
+}
 
 bool RenderPipeline::RecordConsumerBoundary(
     Stack::NodeMath::SpecializedStageKind kind,

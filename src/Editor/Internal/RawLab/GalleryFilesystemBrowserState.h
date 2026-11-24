@@ -3,6 +3,7 @@
 #include "Animation/FrameTween.h"
 #include "Search/FolderIndex.h"
 #include "GalleryBrowserMotion.h"
+#include "GalleryBrowserSelection.h"
 #include <atomic>
 #include <mutex>
 #include <string>
@@ -28,12 +29,13 @@ struct GalleryFilesystemBrowser::State {
         unsigned texture=0;
         int previewWidth=0, previewHeight=0, previewFrame=-1;
         bool previewRequested=false;
+        std::uint64_t listingGeneration=0, previewGeneration=0;
         bool drive=false,capacityKnown=false,systemDrive=false;
         float gridScroll=0;
         float usedFraction=0;
         std::string capacityLabel;
     };
-    struct Result { std::shared_ptr<Node> node; std::vector<std::shared_ptr<Node>> children; std::string error; };
+    struct Result { std::shared_ptr<Node> node; std::vector<std::shared_ptr<Node>> children; std::string error; std::uint64_t generation=0; };
     struct Row { std::shared_ptr<Node> node; int depth; bool message=false; };
     std::vector<std::shared_ptr<Node>> roots;
     std::vector<std::shared_ptr<Node>> drives, shortcuts;
@@ -47,12 +49,36 @@ struct GalleryFilesystemBrowser::State {
     double searchAt=0;
     std::unordered_map<std::wstring, std::shared_ptr<Node>> listings;
     std::shared_ptr<Node> directory, selection;
+    struct GridHit {
+        std::shared_ptr<Node> node;
+        ImRect bounds{};
+        std::size_t index = 0;
+    };
+    GridHit hit;
+    std::shared_ptr<Node> rightOrigin;
+    std::shared_ptr<Node> contextNode;
+    bool contextRequested = false;
+    BrowserRightDrag rightDrag;
+    std::optional<BrowserSelectionRange> selectedRange;
+    bool escapeConsumed = false;
+    std::vector<std::filesystem::path> draggedImages;
+    std::shared_ptr<Node> leftOrigin;
+    std::size_t leftIndex = 0;
+    std::filesystem::path dropFolder;
+    bool movingImages = false;
+    std::optional<BrowserFiles::Result> confirmFile;
+    std::optional<BrowserFiles::Request> renameFile;
+    bool nameRequested = false;
+    char fileName[1024]{};
+    bool GridSelected(std::size_t index) const;
+    void CancelGridInput(bool clearSelection);
     bool resetGridScroll = false;
     std::string addressError;
     std::vector<Row> rows;
     std::mutex mutex;
     std::vector<Result> results;
-    struct Preview { std::shared_ptr<Node> node; std::vector<unsigned char> pixels; int width=0,height=0; };
+    struct Preview { std::shared_ptr<Node> node; std::vector<unsigned char> pixels; int width=0,height=0; std::uint64_t generation=0; };
+    std::uint64_t previewGeneration=0;
     std::vector<Preview> previews;
     std::atomic<bool> previewReady{false};
     std::vector<std::shared_ptr<Node>> previewNodes;
@@ -95,6 +121,7 @@ struct GalleryFilesystemBrowser::State {
     void RequestPreview(const std::shared_ptr<State>& self,const std::shared_ptr<Node>& node);
     void PumpPreviews();
     void ReleasePreviews();
+    void InvalidatePreviews(const std::vector<BrowserFiles::Change>&);
     void SearchChanged();
     void PumpSearch(const std::shared_ptr<State>& self);
 };

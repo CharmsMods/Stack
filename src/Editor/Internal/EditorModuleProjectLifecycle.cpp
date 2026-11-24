@@ -742,6 +742,31 @@ Stack::RawRecipe::RawDevelopmentRecipe EditorModule::BuildRawWorkspaceDefaultRec
     return recipe;
 }
 
+bool EditorModule::InitializeRawOpeningExposure(float ev) {
+    auto& opening = m_DeferredLoadedProjectApply;
+    if (!opening.openingExposurePending || opening.step != DeferredLoadedProjectApplyState::Step::WaitForFirstRender)
+        return false;
+    opening.openingExposurePending = false;
+    auto& layers = m_Project->rawLayers;
+    if (!(ev > 0.f && ev <= 1.f) || layers.GestureActive() ||
+        opening.openingExposureEditRevision != m_Project->editRevision ||
+        opening.openingExposureLayerRevision != layers.Revision()) return false;
+
+    auto candidate = layers.State();
+    const auto* exposure = Stack::Project::FindRawOperation(candidate.background, Stack::RawRecipe::GraphOperationKind::LocalEv);
+    if (!exposure) return false;
+    auto recipe = Stack::RawRecipe::ReadGraphOperation(exposure->rawOperation);
+    if (recipe.preToneExposureEv != 0.f) return false;
+    recipe.preToneExposureEv = ev;
+    std::string error;
+    const auto uuid = exposure->instanceUuid;
+    if (!Stack::Project::WriteRawLayerOperation(candidate.background, uuid, recipe, error)) return false;
+    const auto revision = m_Project->editRevision;
+    auto prepared = layers.Prepare(std::move(candidate), error, &m_Project->graph,
+        ResolveRawWorkspaceStageOutputNodeId(), revision);
+    return prepared && layers.Commit(std::move(*prepared), error, true, true, revision, &m_Project->graph);
+}
+
 bool EditorModule::BuildRawWorkspaceProjectGraph(
     const Stack::RawRecipe::RawDevelopmentRecipe& recipe,
     bool markEdited,
@@ -1309,6 +1334,7 @@ bool EditorModule::StageRawWorkspaceProjectForSourcePreview(
     loadedProject->rawWorkspaceData = std::move(previewDocument.rawWorkspaceData);
     loadedProject->projectKind = StackBinaryFormat::kRawProjectKind;
     loadedProject->transientRawPreview = true;
+    loadedProject->initializeRawOpeningExposure = true;
     loadedProject->projectName = projectName;
     loadedProject->projectFileName = expectedProject.absolutePath.string();
 

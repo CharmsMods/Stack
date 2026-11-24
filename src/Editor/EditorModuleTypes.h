@@ -796,6 +796,9 @@ struct DeferredLoadedProjectApplyState {
     std::size_t nextThumbnailIndex = 0;
     std::uint64_t targetRenderRevision = 0;
     std::uint64_t acceptedRenderGenerationAtStart = 0;
+    bool openingExposurePending = false;
+    std::uint64_t openingExposureEditRevision = 0;
+    std::uint64_t openingExposureLayerRevision = 0;
     std::string statusText;
     std::function<void(bool, const std::string&)> completion;
 };

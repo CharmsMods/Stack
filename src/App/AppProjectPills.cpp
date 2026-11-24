@@ -140,23 +140,29 @@ void AppShell::RenderProjectPills(const ImVec2& position, const ImVec2& size) {
         const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
         auto* draw = ImGui::GetWindowDrawList();
         if (workspace->galleryArrivalPending && ImGui::IsItemVisible()) {
-            if (workspace->galleryArrivalStarted < 0) workspace->galleryArrivalStarted=ImGui::GetTime();
+            if (workspace->galleryArrivalStarted < 0) {
+                workspace->galleryArrivalStarted=ImGui::GetTime();
+                m_GalleryNavigationMotion->FinishWaiting(workspace->galleryTileLoaderIntent);
+            }
             const float elapsed=float((ImGui::GetTime()-workspace->galleryArrivalStarted)/.32);
-            const float t=Stack::Notifications::SystemReducedMotion()?1.f:std::clamp(elapsed,0.f,1.f);
+            const bool reduced = Stack::Notifications::SystemReducedMotion();
+            const float t=reduced?1.f:std::clamp(elapsed,0.f,1.f);
             const float ease=t*t*(3.f-2.f*t);
             const auto& origin=workspace->galleryOrigin;
-            if (origin.thumbnail && t<1.f) {
+            if (origin.Valid() && t<1.f) {
                 const auto mix=[&](ImVec2 a,ImVec2 b) {return ImVec2(a.x+(b.x-a.x)*ease,a.y+(b.y-a.y)*ease);};
-                const float fit=std::min((max.x-min.x-4.f*rail.scale)/origin.thumbnail->width,
-                    (max.y-min.y-4.f*rail.scale)/origin.thumbnail->height);
-                const ImVec2 extent(origin.thumbnail->width*fit,origin.thumbnail->height*fit);
+                const float sourceWidth = origin.thumbnail ? float(origin.thumbnail->width) : origin.maximum.x - origin.minimum.x;
+                const float sourceHeight = origin.thumbnail ? float(origin.thumbnail->height) : origin.maximum.y - origin.minimum.y;
+                const float fit=std::max(0.f,std::min((max.x-min.x-4.f*rail.scale)/sourceWidth,
+                    (max.y-min.y-4.f*rail.scale)/sourceHeight));
+                const ImVec2 extent(sourceWidth*fit,sourceHeight*fit);
                 const ImVec2 destination((min.x+max.x-extent.x)*.5f,(min.y+max.y-extent.y)*.5f);
                 const ImRect flying(mix(origin.minimum,destination),mix(origin.maximum,{destination.x+extent.x,destination.y+extent.y}));
-                ImGui::GetForegroundDrawList()->AddImageRounded((ImTextureID)(intptr_t)origin.thumbnail->texture,
-                    flying.Min,flying.Max,
-                    origin.uvMinimum,origin.uvMaximum,IM_COL32_WHITE,3.f*rail.scale);
+                if (origin.thumbnail)
+                    ImGui::GetForegroundDrawList()->AddImageRounded((ImTextureID)(intptr_t)origin.thumbnail->texture,
+                        flying.Min,flying.Max,origin.uvMinimum,origin.uvMaximum,IM_COL32_WHITE,3.f*rail.scale);
                 if(workspace->galleryOpening || editor.IsGalleryBracketProcessing())
-                    Stack::Navigation::GalleryNavigationTransition::DrawLoader(*ImGui::GetForegroundDrawList(),flying,1.f,false);
+                    Stack::Navigation::GalleryNavigationTransition::DrawLoader(*ImGui::GetForegroundDrawList(),flying,1.f,reduced);
             }
             if(t>=1.f) workspace->galleryArrivalPending=false;
         }

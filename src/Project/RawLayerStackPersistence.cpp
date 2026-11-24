@@ -118,8 +118,10 @@ bool SameRawLayerStackExceptExposure(const RawLayerStackState& a, const RawLayer
     auto normalized = b;
     const auto restoreExposure = [](const RawAdjustmentLayer& before, RawAdjustmentLayer& after) {
         for (auto& node : after.graph.EditNodes()) {
-            if (node.kind != EditorNodeGraph::NodeKind::RawOperation ||
-                node.rawOperation.kind != RawRecipe::GraphOperationKind::Exposure) continue;
+            if (node.kind != EditorNodeGraph::NodeKind::RawOperation) continue;
+            const auto operation = node.rawOperation.kind;
+            if (operation != RawRecipe::GraphOperationKind::Exposure &&
+                operation != RawRecipe::GraphOperationKind::LocalEv) continue;
             for (const auto& original : before.graph.GetNodes()) {
                 if (original.instanceUuid != node.instanceUuid || original.kind != node.kind ||
                     original.rawOperation.kind != node.rawOperation.kind) continue;

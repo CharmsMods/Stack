@@ -17,6 +17,7 @@ struct GalleryNavigatorAction {
     std::optional<std::string> folder;
     std::optional<std::filesystem::path> openPath;
     std::optional<std::filesystem::path> openImage;
+    std::vector<BrowserFiles::Change> fileChanges;
     std::optional<std::uint64_t> fileTypes;
     ImVec2 browseMinimum{},browseMaximum{};
 };
@@ -31,6 +32,10 @@ public:
         RawWorkspace::GalleryContentMode category, const std::optional<std::string>& folder,
         ImVec4 surface, const std::function<void()>& footer,
         std::uint64_t fileTypes = AllGalleryFileTypes);
+    void SetFileProtectionProvider(GalleryFilesystemBrowser::ProtectionProvider provider) {
+        m_Filesystem.SetProtectionProvider(std::move(provider));
+    }
+    bool FileOperationBusy() const { return m_Filesystem.FileOperationBusy(); }
     GalleryNavigatorFooterAction RenderFooter(bool grid, bool properties,
         bool canSort, const char* sortLabel);
 

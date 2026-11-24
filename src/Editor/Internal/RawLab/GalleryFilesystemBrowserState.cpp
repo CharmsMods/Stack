@@ -32,6 +32,8 @@ void GalleryFilesystemBrowser::State::Merge(std::vector<std::shared_ptr<Node>>& 
     std::vector<std::shared_ptr<Node>> incoming) {
     for(auto& node:incoming)if(const auto found=listings.find(node->key);found!=listings.end()) {
         // Keep identity, expansion, cached children and pending requests stable.
+        found->second->path = node->path;
+        found->second->pathLabel = node->pathLabel;
         const auto oldKind=found->second->kind;
         const bool locationAlias=oldKind==Kind::Desktop || oldKind==Kind::Downloads || oldKind==Kind::Pictures;
         if(node->kind!=Kind::Folder || !locationAlias) {
@@ -52,9 +54,10 @@ void GalleryFilesystemBrowser::State::Request(const std::shared_ptr<State>& self
     node->pending=true;node->error.clear();dirty=true;
     // Capture immutable inputs, not UI-owned fields that a refresh may change.
     const auto path=node->path;const auto branch=node->branch;const bool inherit=node->kind==Kind::Folder;
-    if(!Async::TaskSystem::Get().Submit("Listing folders",[self,node,path,branch,inherit] {
+    const auto generation=++node->listingGeneration;
+    if(!Async::TaskSystem::Get().Submit("Listing folders",[self,node,path,branch,inherit,generation] {
         if(self->closed.load())return;
-        Result result;result.node=node;
+        Result result;result.node=node;result.generation=generation;
         try {
             std::error_code error;
             std::filesystem::directory_iterator it(path,error),end;
@@ -170,8 +173,10 @@ void GalleryFilesystemBrowser::State::Pump(const std::shared_ptr<State>& self) {
                 locationsError=std::move(result.error);
             } else {
                 auto& n=*result.node;
+                if (n.listingGeneration != result.generation) continue;
                 // A failed refresh must not replace a useful cached subtree.
                 if(result.error.empty()) {
+                    if (result.node == directory && searchKey.empty()) CancelGridInput(true);
                     Merge(n.children,std::move(result.children));
                     n.folderChildren=std::count_if(n.children.begin(),n.children.end(),[](const auto& child){return child->kind!=Kind::Image;});
                 }
@@ -225,6 +230,11 @@ void GalleryFilesystemBrowser::State::Navigate(const std::filesystem::path& path
     if(!path.empty()) {
         auto& entry=listings[currentKey];
         if(!entry)entry=Make(path);
+        else if (entry->path.native() != path.native()) {
+            entry->path = path;
+            entry->pathLabel = path.u8string();
+            entry->label = path.filename().u8string();
+        }
         directory=entry;
     }
     // Clicking a visible row must keep it under the pointer, not align it to

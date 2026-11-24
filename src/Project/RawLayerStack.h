@@ -132,7 +132,7 @@ bool WriteRawLayerOperation(RawAdjustmentLayer& layer, const std::string& uuid,
 nlohmann::json SerializeRawLayerStack(const RawLayerStackState& state, bool includeAssets = true);
 bool SameRawLayerStackState(const RawLayerStackState& a, const RawLayerStackState& b);
 // Edit-time comparison for temporary original previews; topology and every
-// parameter except existing Exposure nodes' EV remain significant.
+// parameter except the EV value of existing Exposure and Local EV nodes remain significant.
 bool SameRawLayerStackExceptExposure(const RawLayerStackState& a, const RawLayerStackState& b);
 bool DeserializeRawLayerStack(const nlohmann::json& value, RawLayerStackState& result, std::string& error);
 bool ReadRawLayersFromPipeline(const nlohmann::json& pipeline, RawLayerStackState& result, std::string& error, bool required = false);

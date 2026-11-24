@@ -32,6 +32,7 @@ struct LoadedProjectData {
     // preview, not a saved project using an older storage format. Its first
     // authored edit materializes the current managed project store.
     bool transientRawPreview = false;
+    bool initializeRawOpeningExposure = false;
     // Immutable RAW source decoded by the background open task. The live
     // renderer can consume it directly instead of invoking LibRaw during an
     // editor frame. Empty for normal and multi-frame projects.

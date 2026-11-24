@@ -176,7 +176,8 @@ GalleryNavigatorAction GalleryNavigator::Render(GalleryFolderTree& tree, Mode ca
     ImGui::PopStyleVar(3);
     ImGui::PopStyleColor(3);
     ImGui::PopFont();
-    const auto browser=m_Filesystem.RenderPopup();
+    auto browser=m_Filesystem.RenderPopup();
+    result.fileChanges=std::move(browser.changes);
     result.openPath=browser.folder;result.openImage=browser.image;
     return result;
 }

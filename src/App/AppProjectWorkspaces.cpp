@@ -111,6 +111,33 @@ void AppShell::ConfigureWorkspaceEditor(EditorModule& editor) {
         return std::any_of(m_ProjectWorkspaces.begin(), m_ProjectWorkspaces.end(), usesPath) ||
             std::any_of(m_RetiredProjectWorkspaces.begin(), m_RetiredProjectWorkspaces.end(), usesPath);
     });
+    editor.SetGalleryFileProtectionProvider([this] {
+        std::vector<std::filesystem::path> paths;
+        const auto appendOpen = [&](const GalleryTabOpen& target) {
+            paths.push_back(target.path);
+            paths.insert(paths.end(), target.bracketSources.begin(), target.bracketSources.end());
+        };
+        if (m_PendingGalleryTabOpen) appendOpen(*m_PendingGalleryTabOpen);
+        for (const auto& target : m_GalleryTabOpenQueue) appendOpen(target);
+        for (const auto& target : m_BackgroundGalleryTabOpens) appendOpen(target);
+        const auto appendWorkspace = [&](const auto& workspace) {
+            workspace->editor->AppendGalleryFileDependencies(paths);
+            if (workspace->id != m_GalleryWorkspaceId) paths.push_back(workspace->sourceWorkspaceRoot);
+            if (workspace->loadTransition.phase != ProjectLoadPhase::None)
+                paths.emplace_back(workspace->loadTransition.projectFileName);
+        };
+        for (const auto& workspace : m_ProjectWorkspaces) appendWorkspace(workspace);
+        for (const auto& workspace : m_RetiredProjectWorkspaces) appendWorkspace(workspace);
+        m_QueueRenderer.AppendActiveFileDependencies(paths);
+        for (const auto& item : m_Queue.Model().Snapshot()) {
+            paths.push_back(item.path);
+            if (item.projectSnapshot && item.projectSnapshot->rawProjectSnapshot)
+                for (const auto& asset : item.projectSnapshot->rawProjectSnapshot->embeddedAssets)
+                    if (asset.linkedSource && !asset.originalSourcePath.empty())
+                        paths.push_back(std::filesystem::u8path(asset.originalSourcePath));
+        }
+        return paths;
+    });
     editor.SetGalleryNavigationHandler([this, owner] {
         if (owner == m_Editor)
             QueueWorkspaceTabAction(WorkspaceTabAction::Select, m_GalleryWorkspaceId);
@@ -151,14 +178,24 @@ void AppShell::ConfigureWorkspaceEditor(EditorModule& editor) {
                         : GalleryTabOpen::Kind::Source;
                     target.openInSidebar = m_NavigationRail.openGalleryInSidebar;
                     target.path = item.path;
-                    target.transitionOrigin=item.transitionOrigin.Valid()?item.transitionOrigin:
+                    target.transitionOrigin=!item.transitionOrigin.subject.empty()?item.transitionOrigin:
                         owner->CaptureGalleryTransitionOrigin(item.path);
                     target.navigationGeneration=(&item==&selection.items.back()) ? intent : 0;
                     target.sourceWorkspaceRoot = item.sourceWorkspaceRoot.empty()
                         ? owner->ResolveRawWorkspaceSourceFolder(item.path)
                         : item.sourceWorkspaceRoot;
-                    if(!target.openInSidebar && target.navigationGeneration && target.transitionOrigin.Valid())m_GalleryNavigationMotion->AwaitPreview(target.transitionOrigin);
+                    if(target.navigationGeneration && target.transitionOrigin.Valid())m_GalleryNavigationMotion->AwaitPreview(target.transitionOrigin);
                     m_GalleryTabOpenQueue.push_back(std::move(target));
+                }
+                if (selection.items.size() == 1 && !selection.items.front().project) {
+                    // The pending callback's lifetime distinguishes a yield
+                    // from a dismissed prompt without polling the coordinator.
+                    const auto action = std::make_shared<int>(0);
+                    if (owner->RequestAutoBracketForeground("open an image", [this, intent, action] {
+                        const auto open = std::find_if(m_GalleryTabOpenQueue.begin(), m_GalleryTabOpenQueue.end(),
+                            [intent](const auto& target) { return target.navigationGeneration == intent; });
+                        if (open != m_GalleryTabOpenQueue.end()) open->bracketYield.reset();
+                    })) m_GalleryTabOpenQueue.back().bracketYield = action;
                 }
             }
         });
@@ -309,7 +346,11 @@ void AppShell::TickProjectWorkspaces(Stack::App::UiFrameWorkBudget& workBudget) 
     const auto openPendingGalleryTab = [this]() {
         if (!m_PendingGalleryTabOpen) return;
         auto* workspace = FindProjectWorkspace(m_PendingGalleryTabOpen->workspaceId);
-        if (!workspace) { m_PendingGalleryTabOpen.reset(); return; }
+        if (!workspace) {
+            m_GalleryNavigationMotion->FinishWaiting(m_PendingGalleryTabOpen->navigationGeneration);
+            m_PendingGalleryTabOpen.reset();
+            return;
+        }
         auto* editor = workspace->editor.get();
         const GalleryTabOpen& target = *m_PendingGalleryTabOpen;
         if (target.kind == GalleryTabOpen::Kind::Bracket) {
@@ -325,7 +366,7 @@ void AppShell::TickProjectWorkspaces(Stack::App::UiFrameWorkBudget& workBudget) 
             if (target.path.extension() != ".stack" && editor->IsRawWorkspaceScanBusy()) return;
             if (!editor->RequestOpenRawWorkspaceProjectFromGallery(target.path)) {
                 workspace->galleryOpening=false;
-                if(target.navigationGeneration==m_GalleryNavigationMotion->Intent())m_GalleryNavigationMotion->FinishWaiting();
+                m_GalleryNavigationMotion->FinishWaiting(target.navigationGeneration);
                 if(workspace->id==m_ActiveProjectWorkspace && m_GalleryNavigationMotion->Waiting(workspace->id))
                     QueueWorkspaceTabAction(WorkspaceTabAction::Select,m_GalleryWorkspaceId);
                 PostUiNotification(editor->GetNotifier(), UiNotificationSeverity::Error,
@@ -347,7 +388,14 @@ void AppShell::TickProjectWorkspaces(Stack::App::UiFrameWorkBudget& workBudget) 
             m_PendingGalleryTabOpen.reset();
         }
     }
+    while (!m_GalleryTabOpenQueue.empty()) {
+        const auto& next = m_GalleryTabOpenQueue.front();
+        if (!next.bracketYield || !next.bracketYield->expired()) break;
+        m_GalleryNavigationMotion->FinishWaiting(next.navigationGeneration);
+        m_GalleryTabOpenQueue.pop_front();
+    }
     if (!m_PendingGalleryTabOpen && !m_GalleryTabOpenQueue.empty() &&
+        !m_GalleryTabOpenQueue.front().bracketYield &&
         m_WorkspaceTabAction == WorkspaceTabAction::None &&
         CanSwitchProjectWorkspace()) {
         m_WorkspaceTabAction = WorkspaceTabAction::Create;
@@ -378,7 +426,8 @@ void AppShell::TickProjectWorkspaces(Stack::App::UiFrameWorkBudget& workBudget) 
         }
         const bool leavingCurrent = action == WorkspaceTabAction::Create || id != m_ActiveProjectWorkspace;
         if (leavingCurrent && !m_Editor->FinishWorkspaceInteraction()) return;
-        if (action == WorkspaceTabAction::Create && !m_GalleryTabOpenQueue.empty()) {
+        if (action == WorkspaceTabAction::Create && !m_GalleryTabOpenQueue.empty() &&
+            !m_GalleryTabOpenQueue.front().bracketYield) {
             if (m_Editor->FinishWorkspaceInteraction()) {
                 const auto& target = m_GalleryTabOpenQueue.front();
                 const auto createdId = CreateProjectWorkspace(target.sourceWorkspaceRoot, target.kind != GalleryTabOpen::Kind::Source);
@@ -394,6 +443,7 @@ void AppShell::TickProjectWorkspaces(Stack::App::UiFrameWorkBudget& workBudget) 
                         created->galleryOrigin=m_PendingGalleryTabOpen->transitionOrigin;
                         created->galleryOpening=staged || m_PendingGalleryTabOpen->openInSidebar;
                         created->galleryOpenIntent=m_PendingGalleryTabOpen->openInSidebar ? 0 : m_PendingGalleryTabOpen->navigationGeneration;
+                        created->galleryTileLoaderIntent=m_PendingGalleryTabOpen->navigationGeneration;
                         created->galleryBracket=m_PendingGalleryTabOpen->kind==GalleryTabOpen::Kind::Bracket;
                         created->galleryArrivalPending=(created->galleryBracket || m_PendingGalleryTabOpen->openInSidebar) && created->galleryOrigin.Valid();
                         if (created->galleryBracket) created->rootTab=static_cast<int>(Stack::Workspace::Id::Graph);
@@ -437,11 +487,11 @@ void AppShell::TickProjectWorkspaces(Stack::App::UiFrameWorkBudget& workBudget) 
             }
             if(workspace.editor->GalleryLoadFailed() || foreground) {
                 workspace.galleryOpening=false;
-                if(requested)m_GalleryNavigationMotion->FinishWaiting();
-            } else if(workspace.editor->GalleryOpeningPreviewReady() &&
-                (!requested || (CanSwitchProjectWorkspace() && ActivateProjectWorkspace(workspace.id)))) {
-                workspace.galleryOpening=false;
-                if(requested)m_GalleryNavigationMotion->FinishWaiting();
+                m_GalleryNavigationMotion->FinishWaiting(workspace.galleryTileLoaderIntent);
+            } else if(workspace.editor->GalleryOpeningPreviewReady()) {
+                m_GalleryNavigationMotion->FinishWaiting(workspace.galleryTileLoaderIntent);
+                if (!requested || (CanSwitchProjectWorkspace() && ActivateProjectWorkspace(workspace.id)))
+                    workspace.galleryOpening=false;
             }
         }
         if(foreground && m_GalleryNavigationMotion->Waiting(workspace.id) &&
@@ -522,6 +572,7 @@ void AppShell::FinishProjectWorkspaceRetirement() {
                 (*current)->editor->GetRawWorkspacePresentationPreferences(), true);
     }
     m_GalleryNavigationMotion->Retire(retiringId);
+    m_GalleryNavigationMotion->FinishWaiting((*current)->galleryTileLoaderIntent);
     m_WorkspaceCompositor.ForgetProjectPreview(retiringId);
     if (m_NavigationRail.previewProject == retiringId) CancelProjectPillPreview();
     auto retiring = std::move(*current);

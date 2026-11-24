@@ -1136,6 +1136,9 @@ void EditorModule::TickDeferredLoadedProjectApply(double projectApplyBudgetMs) {
                 m_RenderRevision;
             m_DeferredLoadedProjectApply.acceptedRenderGenerationAtStart =
                 m_LastCompletedRenderGeneration;
+            m_DeferredLoadedProjectApply.openingExposurePending = project.initializeRawOpeningExposure;
+            m_DeferredLoadedProjectApply.openingExposureEditRevision = m_Project->editRevision;
+            m_DeferredLoadedProjectApply.openingExposureLayerRevision = m_Project->rawLayers.Revision();
             m_DeferredLoadedProjectApply.allowRenderSubmission = true;
             const bool typedMultiFrameProject =
                 project.rawProjectSnapshot &&

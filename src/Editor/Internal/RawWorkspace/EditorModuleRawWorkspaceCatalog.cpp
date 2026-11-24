@@ -289,7 +289,8 @@ void EditorModule::SelectRawWorkspaceSourceForGallery(
     bool toggle,
     bool extendRange,
     bool openForEditing,
-    const std::vector<std::string>* visibleSourceOrder) {
+    const std::vector<std::string>* visibleSourceOrder,
+    Stack::Renderer::GalleryTransitionOrigin origin) {
     if(!openForEditing && IsBracketingToolActive() && !m_RawWorkspaceLabUi.galleryWorkspaceOpen) {
         SelectBracketingSources({sourceKey},toggle,extendRange);
         return;
@@ -301,6 +302,10 @@ void EditorModule::SelectRawWorkspaceSourceForGallery(
             return source.relativePathKey == sourceKey;
         });
     if (target == m_RawWorkspace.sources.end()) return;
+    if (openForEditing && m_PermanentGalleryWorkspace) {
+        QueueGalleryOriginalOpen(*target, std::move(origin));
+        openForEditing = false;
+    }
 
     bool selectedRange = false;
     if (extendRange && !m_RawWorkspace.selectedSourceKey.empty()) {
@@ -353,22 +358,26 @@ void EditorModule::SelectRawWorkspaceSourceForGallery(
     }
 }
 
+bool EditorModule::QueueGalleryOriginalOpen(const Stack::RawWorkspace::SourceRecord& source,
+    Stack::Renderer::GalleryTransitionOrigin origin) {
+    if (!m_RawGalleryOpenSelectionHandler) return false;
+    if (origin.thumbnailKey.empty()) origin = CaptureGalleryTransitionOrigin(source.absolutePath, source.relativePathKey);
+    RawGalleryOpenSelection selection;
+    selection.items.push_back({source.absolutePath, false,
+        Stack::RawWorkspace::ResolveSourceWorkspaceRoot(source, m_RawWorkspace.workspaceRoot), std::move(origin)});
+    m_RawGalleryOpenSelectionHandler(std::move(selection), false);
+    return true;
+}
+
 bool EditorModule::RequestOpenRawWorkspaceSourceForEditing(
     const std::string& sourceKey) {
-    if(RequestAutoBracketForeground("open an image",[this,sourceKey]{RequestOpenRawWorkspaceSourceForEditing(sourceKey);}))return true;
     const Stack::RawWorkspace::SourceRecord* source =
         FindRawWorkspaceSourceByKey(sourceKey);
     if (!source) {
         return false;
     }
-    if (m_PermanentGalleryWorkspace) {
-        if (!m_RawGalleryOpenSelectionHandler) return false;
-        RawGalleryOpenSelection selection;
-        selection.items.push_back({source->absolutePath, false,
-            Stack::RawWorkspace::ResolveSourceWorkspaceRoot(*source, m_RawWorkspace.workspaceRoot)});
-        m_RawGalleryOpenSelectionHandler(std::move(selection), false);
-        return true;
-    }
+    if (m_PermanentGalleryWorkspace) return QueueGalleryOriginalOpen(*source);
+    if(RequestAutoBracketForeground("open an image",[this,sourceKey]{RequestOpenRawWorkspaceSourceForEditing(sourceKey);}))return true;
     if (IsDeferredLoadedProjectApplyActive() ||
         IsRawWorkspaceProjectLoadBusy()) {
         PostNotification(

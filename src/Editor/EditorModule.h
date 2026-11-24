@@ -1063,7 +1063,7 @@ public:
     bool RequestOpenRawWorkspaceProject(
         const std::filesystem::path& projectPath);
     bool RequestOpenRawWorkspaceProjectFromGallery(
-        const std::filesystem::path& projectPath);
+        const std::filesystem::path& projectPath, Stack::Renderer::GalleryTransitionOrigin origin = {});
     bool SaveActiveMultiFrameRawProject(std::string* errorMessage = nullptr);
     bool SaveActiveMultiFrameRawProjectAs(
         const std::filesystem::path& destination,
@@ -1167,6 +1167,11 @@ public:
     void OpenAllRawWorkspaceFolders() { SetRawWorkspaceAllFolders(true); }
     void ShowRawWorkspaceSourceFolders();
     void OpenRawWorkspaceFolderBrowser() { ShowRawWorkspaceSourceFolders(); }
+    void SetGalleryFileProtectionProvider(std::function<std::vector<std::filesystem::path>()> provider) {
+        m_RawGalleryNavigator.SetFileProtectionProvider(std::move(provider));
+    }
+    bool GalleryFileOperationBusy() const { return m_RawGalleryNavigator.FileOperationBusy(); }
+    void AppendGalleryFileDependencies(std::vector<std::filesystem::path>& paths) const;
     bool IsRawWorkspaceFolderBrowserOpen() const { return m_RawGallerySourceFoldersOpen; }
     const std::vector<Stack::RawWorkspace::SourceFolderCard>& GetRawWorkspaceSourceFolderCards() const;
     bool FindRawWorkspaceGalleryProjectRecord(const std::filesystem::path& path, Stack::Project::ProjectRecord& record) const;
@@ -1245,7 +1250,8 @@ public:
         bool toggle,
         bool extendRange,
         bool openForEditing,
-        const std::vector<std::string>* visibleSourceOrder = nullptr);
+        const std::vector<std::string>* visibleSourceOrder = nullptr,
+        Stack::Renderer::GalleryTransitionOrigin origin = {});
     bool IsRawWorkspaceScanBusy() const;
     bool IsRawWorkspaceScanBlockingGallery() const;
     bool IsRawWorkspaceThumbnailBusy() const;
@@ -3119,6 +3125,7 @@ private:
     }
     Stack::RawRecipe::RawDevelopmentRecipe BuildRawWorkspaceDefaultRecipe(
         const Stack::RawWorkspace::SourceRecord& source) const;
+    bool InitializeRawOpeningExposure(float ev);
     bool BuildRawWorkspaceProjectGraph(
         const Stack::RawRecipe::RawDevelopmentRecipe& recipe,
         bool markEdited = true,
@@ -3141,6 +3148,8 @@ private:
     bool SaveActiveRawWorkspaceProjectIfDirty();
     bool RequestOpenRawWorkspaceSourceForEditing(
         const std::string& sourceKey);
+    bool QueueGalleryOriginalOpen(const Stack::RawWorkspace::SourceRecord& source,
+        Stack::Renderer::GalleryTransitionOrigin origin = {});
     void QueueRawWorkspaceProjectReplacement(
         std::string actionLabel,
         std::string targetLabel,

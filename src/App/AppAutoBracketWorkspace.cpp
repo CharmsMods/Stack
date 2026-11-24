@@ -48,6 +48,7 @@ void AppShell::TickAutoBracketWorkspaces() {
         std::any_of(m_RetiredProjectWorkspaces.begin(),m_RetiredProjectWorkspaces.end(),foregroundWork);
     auto* gallery = FindProjectWorkspace(m_GalleryWorkspaceId);
     if (!gallery) return;
+    const bool organizingFiles = gallery->editor->GalleryFileOperationBusy();
     const auto& galleryRoot = gallery->editor->GetRawWorkspaceState().workspaceRoot;
     bool workerExists = false;
     const auto publishCatalogChanges = [this](EditorModule& worker) {
@@ -70,7 +71,7 @@ void AppShell::TickAutoBracketWorkspaces() {
         const auto& workerRoot=workspace->editor->GetRawWorkspaceState().workspaceRoot;
         workerExists |= workerRoot==galleryRoot || Stack::Project::SameProjectPath(workerRoot,galleryRoot);
         workspace->editor->SetAutoBracketProtectedProjectIds(protectedProjects,protectedPaths);
-        workspace->editor->TickAutoBracketing(blocked || foregroundBusy || workspace->rawCatalogRefreshPending);
+        workspace->editor->TickAutoBracketing(blocked || foregroundBusy || organizingFiles || workspace->rawCatalogRefreshPending);
         publishCatalogChanges(*workspace->editor);
     }
     for (auto& workspace : m_RetiredProjectWorkspaces) {
@@ -97,8 +98,8 @@ void AppShell::TickAutoBracketWorkspaces() {
     // the remembered anchor root. Existing root-owned workers ticked above.
     if (scheduler.IsRawWorkspaceAllFolders() || scheduler.IsRawWorkspaceFolderBrowserOpen()) return;
     scheduler.SetAutoBracketProtectedProjectIds(protectedProjects,protectedPaths);
-    scheduler.TickAutoBracketing(blocked || foregroundBusy || gallery->rawCatalogRefreshPending);
-    if (blocked || foregroundBusy || !scheduler.ConsumeAutoBracketWorkspaceRequest()) return;
+    scheduler.TickAutoBracketing(blocked || foregroundBusy || organizingFiles || gallery->rawCatalogRefreshPending);
+    if (blocked || foregroundBusy || organizingFiles || !scheduler.ConsumeAutoBracketWorkspaceRequest()) return;
 
     auto workspace = std::make_unique<ProjectWorkspace>(m_NextProjectWorkspace++);
     workspace->sourceWorkspaceRoot = galleryRoot;

@@ -154,6 +154,7 @@ private:
         bool openInSidebar = false;
         std::uint64_t navigationGeneration=0;
         Stack::Renderer::GalleryTransitionOrigin transitionOrigin;
+        std::optional<std::weak_ptr<int>> bracketYield;
     };
     std::deque<GalleryTabOpen> m_GalleryTabOpenQueue;
     std::optional<GalleryTabOpen> m_PendingGalleryTabOpen;

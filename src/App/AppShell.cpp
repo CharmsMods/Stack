@@ -1514,8 +1514,9 @@ bool AppShell::Initialize(const std::string& title, int width, int height) {
             titlebarMetrics.fallbackReason.c_str());
     }
 
-    // Captured desktop composition does not require transparent framebuffer/titlebar support.
-    if (!m_UiPerformanceCapture && m_DiagnosticProjectOpenPath.empty()) {
+    // Keep the lantern scene available in source while opening directly into Stack.
+    constexpr bool kPlayStartupScene = false;
+    if (kPlayStartupScene && !m_UiPerformanceCapture && m_DiagnosticProjectOpenPath.empty()) {
         auto desktop = m_StartupWindow.Prepare(m_Window);
         int sceneWidth=0,sceneHeight=0;
         glfwGetFramebufferSize(m_Window,&sceneWidth,&sceneHeight);

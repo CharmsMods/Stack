@@ -300,10 +300,10 @@ void EditorModule::TickBracketing(bool foreground) {
                         Stack::RawRecipe::IsViewTransformEnabled(m_Project->rawRecipe) &&
                         m_Project->rawRecipe.viewTransform.layerJson==Stack::RawRecipe::DefaultViewTransformJson()) {
                         auto candidate=m_Project->rawLayers.State();
-                        if (Stack::Project::FitBracketStartingCurve(candidate,*ui.result,ui.recipe) &&
+                        if (Stack::Project::FitBracketStartingAdjustments(candidate,*ui.result,ui.recipe) &&
                             ApplyRawLayerStackEdit(std::move(candidate),true,false))
                             PostNotification(UiNotificationSeverity::Info,
-                                "HDR highlights fitted in Tone Curve. Undo restores the previous curve.","hdr-starting-curve");
+                                "HDR starting adjustments are ready in Light. Undo restores the previous values.","hdr-starting-curve");
                     }
                 }
                 if(m_DocumentPersistenceEnabled && !job->restoredFromProject)MarkDirty();

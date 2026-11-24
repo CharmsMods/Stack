@@ -189,7 +189,7 @@ void ExecuteWork(const std::shared_ptr<Work>& work,const Raw::OpenGlTaskExecutor
                 RawLayerStackState layers;
                 std::string layerError;
                 if(ReadRawLayersFromPipeline(snapshot.pipelineData,layers,layerError) &&
-                    FitBracketStartingCurve(layers,result,recipe))
+                    FitBracketStartingAdjustments(layers,result,recipe))
                     snapshot.pipelineData["rawLayerStack"]=SerializeRawLayerStack(layers);
                 set->settings[kBracketToneFitConsidered]=true;
             }

@@ -19,6 +19,19 @@
 #include <string_view>
 #include <vector>
 
+float RenderPipeline::ExecuteGraphWithOpeningExposureProbe(const RenderGraphSnapshot& graph, int operationId) {
+    m_OpeningExposureProbeOperation = operationId;
+    m_OpeningExposureProbeEv = 0.f;
+    try {
+        ExecuteGraph(graph);
+    } catch (...) {
+        m_OpeningExposureProbeOperation = 0;
+        throw;
+    }
+    m_OpeningExposureProbeOperation = 0;
+    return m_OpeningExposureProbeEv;
+}
+
 namespace Stack::Renderer::GraphExecution {
 
 std::pair<int,int> GraphExecutionRuntime::ProjectMaskCanvasExtent(const RenderGraphNode& node) const {
@@ -176,6 +189,20 @@ void GraphExecutionRuntime::Execute() {
             finalRegion = Stack::Renderer::WholeImageRegion(finalWidth, finalHeight);
         finalGeometry = {outputIt->second->nativeWidth, outputIt->second->nativeHeight,
             finalRegion, finalWidth, finalHeight};
+    }
+    if (finalTexture && !finalDenoisePending && pipeline.m_OpeningExposureProbeOperation > 0) {
+        const int operationId = std::exchange(pipeline.m_OpeningExposureProbeOperation, 0);
+        const auto operation = nodes.find(operationId);
+        const auto* input = executionContext.FindInputLink(operationId, "imageIn");
+        if (operation != nodes.end() && input &&
+            input->semanticDescriptor.transfer.state == NodeMath::KnowledgeState::Known &&
+            input->semanticDescriptor.transfer.value.kind == NodeMath::TransferKind::Linear &&
+            input->semanticDescriptor.reference.state == NodeMath::KnowledgeState::Known &&
+            input->semanticDescriptor.reference.value == NodeMath::ReferenceState::Scene) {
+            const auto texture = evalImage(input->fromNodeId, input->fromSocketId);
+            if (!pipeline.m_RawViewportAppliedRegion.Partial() && !pipeline.m_CurrentGraphImageGeometry.resident.Partial())
+                pipeline.m_OpeningExposureProbeEv = pipeline.MeasureOpeningExposure(texture, operation->second->rawWorkingSpace);
+        }
     }
     if (graph.rawLayerScopeNodeId > 0 && pipeline.m_RawDevelopmentGraphScopeStage != RawDevelopmentGraphScopeStage::None) {
         const auto scopeTexture = evalImage(graph.rawLayerScopeNodeId, graph.rawLayerScopeSocketId);

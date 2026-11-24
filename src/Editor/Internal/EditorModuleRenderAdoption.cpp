@@ -269,6 +269,16 @@ void EditorModule::ConsumeRenderWorkerResults() {
                 ? !currentRawGeneration || !currentRawRecipe || obsoleteViewport ||
                     (!m_RawWorkspaceRootTabActive && result.rawRenderPurpose == RawRenderPurpose::InteractivePresentation)
                 : !IsCurrentGraphResult(result)));
+        if (!staleResult && result.success && result.openingExposureEv &&
+            InitializeRawOpeningExposure(*result.openingExposureEv)) {
+            // Keep the neutral trial private. The opening render reuses its
+            // source dependencies with the newly seeded project graph.
+            releaseDeferredResultResources(result);
+            MarkRenderRefreshDirty();
+            m_DeferredLoadedProjectApply.targetRenderRevision = m_RenderRevision;
+            m_RenderPending = IsAnyRenderBackendBusy();
+            continue;
+        }
         if (result.viewportPreview.enabled &&
             result.viewportPreview.refinement == Stack::Renderer::ViewportRefinementStep::NavigationCoverage &&
             (!result.success || !result.error.empty() || result.denoisePending)) {

@@ -17,10 +17,10 @@ public:
     void Tick(double now,int frame,bool reduced);
     std::uint64_t NewIntent() {pendingOrigin={}; return ++navigationIntent;}
     std::uint64_t Intent() const {return navigationIntent;}
-    void AwaitPreview(const Origin& origin) {pendingOrigin=origin;pendingSince=time;}
+    void AwaitPreview(const Origin& origin) {pendingOrigin=origin;}
     void BrowseDuringOpen() {if(pendingOrigin.Valid())NewIntent();}
     bool AwaitingPreview() const {return pendingOrigin.Valid();}
-    void FinishWaiting() {pendingOrigin={};}
+    void FinishWaiting(std::uint64_t intent) {if (intent && intent==navigationIntent) pendingOrigin={};}
     static void DrawLoader(ImDrawList&,ImRect,float amount,bool reduced);
     void Folders(bool open,ImRect anchor,ImRect destination={},std::string chosen={});
     bool FoldersVisible() const {return foldersRequested || folderAmount.IsActive() || folderAmount.Value()>.0001f;}
@@ -36,7 +36,7 @@ public:
     void ReturnImage(Origin destination);
     void CancelImage();
     void Retire(std::uint64_t workspace);
-    void Shutdown() {CancelImage();pagesFromFolder.clear();submitted.clear();folderAmount.Finish();sceneAmount.Finish();}
+    void Shutdown() {CancelImage();pendingOrigin={};pagesFromFolder.clear();submitted.clear();folderAmount.Finish();sceneAmount.Finish();}
     bool Owns(std::uint64_t workspace) const {return imageWorkspace==workspace && imageOrigin.Valid();}
     bool ImageMoving(std::uint64_t workspace) const {return Owns(workspace) && (returning || !liveReady || readyAt < 0 || time-readyAt < .76);}
     bool Waiting(std::uint64_t workspace) const {return Owns(workspace) && !returning && !liveReady;}
@@ -62,7 +62,6 @@ private:
     Animation::ScalarChannel folderAmount,sceneAmount{1.f},imageCrop{1.f};
     std::array<Animation::ScalarChannel,4> imageBounds;
     Origin imageOrigin,pendingOrigin;
-    double pendingSince=0;
     ImRect browseAnchor{},folderDestination{},imageTarget{},departure{};
     std::string chosenFolder;
     std::vector<Origin> pagesFromFolder;

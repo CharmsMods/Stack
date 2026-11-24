@@ -215,12 +215,34 @@ bool Wheel(float source,float& rotation,float& sat,bool grade,std::array<float,3
     auto* draw=ImGui::GetWindowDrawList();const auto& palette=Palette();
     const auto at=[&](ImVec2 direction,float r){return ImVec2(center.x+direction.x*r,center.y+direction.y*r);};
     const auto pos=[&](float h,float r){return at({std::cos(h*radians),-std::sin(h*radians)},r);};
-    draw->PrimReserve(sectors*3,sectors*3);
+    constexpr float fadeStart = .96f;
+    const float innerRadius = radius * fadeStart;
+    draw->PrimReserve(sectors * 9, sectors * 9);
     const auto uv=ImGui::GetFontTexUvWhitePixel();
     const auto neutral=ImGui::GetColorU32(IM_COL32(128,128,128,255));
+    const auto innerColor = [fadeStart](ImU32 color) {
+        auto rgba = ImGui::ColorConvertU32ToFloat4(color);
+        constexpr float gray = 128.f / 255.f;
+        rgba.x = gray + (rgba.x - gray) * fadeStart;
+        rgba.y = gray + (rgba.y - gray) * fadeStart;
+        rgba.z = gray + (rgba.z - gray) * fadeStart;
+        return ImGui::GetColorU32(rgba);
+    };
     for(int i=0;i<sectors;++i) {
         const auto& a=palette[i];const auto& b=palette[i+1];
-        draw->PrimVtx(center,uv,neutral);draw->PrimVtx(at(b.unit,radius),uv,ImGui::GetColorU32(b.color));draw->PrimVtx(at(a.unit,radius),uv,ImGui::GetColorU32(a.color));
+        const auto innerA = at(a.unit, innerRadius), innerB = at(b.unit, innerRadius);
+        const auto outerA = at(a.unit, radius), outerB = at(b.unit, radius);
+        const auto colorA = innerColor(a.color), colorB = innerColor(b.color);
+        const auto clearA = a.color & ~IM_COL32_A_MASK, clearB = b.color & ~IM_COL32_A_MASK;
+        draw->PrimVtx(center, uv, neutral);
+        draw->PrimVtx(innerB, uv, colorB);
+        draw->PrimVtx(innerA, uv, colorA);
+        draw->PrimVtx(innerA, uv, colorA);
+        draw->PrimVtx(innerB, uv, colorB);
+        draw->PrimVtx(outerB, uv, clearB);
+        draw->PrimVtx(innerA, uv, colorA);
+        draw->PrimVtx(outerB, uv, clearB);
+        draw->PrimVtx(outerA, uv, clearA);
     }
     const auto ink=ImGui::GetColorU32(ImGuiCol_Text);
     const ImVec2 mouse=ImGui::GetIO().MousePos;

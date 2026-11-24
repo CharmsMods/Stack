@@ -1762,6 +1762,17 @@ EditorRenderWorker::Snapshot EditorModule::BuildRenderSnapshot(std::uint64_t gen
             }
         }
     }
+    const auto& opening = m_DeferredLoadedProjectApply;
+    if (opening.openingExposurePending && opening.step == DeferredLoadedProjectApplyState::Step::WaitForFirstRender &&
+        opening.openingExposureEditRevision == m_Project->editRevision &&
+        opening.openingExposureLayerRevision == m_Project->rawLayers.Revision()) {
+        const auto exposure = std::find_if(snapshot.graph.nodes.begin(), snapshot.graph.nodes.end(), [](const auto& node) {
+            return node.kind == RenderGraphNodeKind::RawOperation &&
+                node.authoredGraphId == Stack::Project::kRawBackgroundId &&
+                node.rawOperation.kind == Stack::RawRecipe::GraphOperationKind::LocalEv;
+        });
+        if (exposure != snapshot.graph.nodes.end()) snapshot.rawWorkspace.openingExposureOperationId = exposure->nodeId;
+    }
     return snapshot;
 }
 

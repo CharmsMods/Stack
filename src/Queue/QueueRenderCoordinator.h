@@ -53,6 +53,7 @@ public:
     void RequestWorkerShutdownForAppClose();
     void Shutdown();
     bool IsBusy() const;
+    void AppendActiveFileDependencies(std::vector<std::filesystem::path>& paths) const;
     bool IsInspectionBusy() const {
         return m_InspectionPhase != InspectionPhase::Idle || m_PendingInspection.has_value();
     }

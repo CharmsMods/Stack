@@ -582,6 +582,8 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         ImGui::ScrollbarEx(rail,window->GetID("GalleryGridScrollbar"),ImGuiAxis_Y,&scroll,
             visible,visible+static_cast<ImS64>(window->ScrollMax.y),ImDrawFlags_RoundCornersAll);
         if (scroll!=static_cast<ImS64>(window->Scroll.y)) {
+            if (m_PermanentGalleryWorkspace && m_GalleryNavigationMotion)
+                m_GalleryNavigationMotion->BrowseDuringOpen();
             m_RawWorkspaceLabGalleryScrollTargetY=m_RawWorkspaceLabGalleryScrollCurrentY=float(scroll);
             ImGui::SetScrollY(float(scroll));
         }
@@ -841,7 +843,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         const std::string& sourceKey,
         bool toggle,
         bool range,
-        bool openForEditing) {
+        bool openForEditing, Stack::Renderer::GalleryTransitionOrigin origin = {}) {
         m_RawWorkspaceLabFocusedProjectPath.clear();
         m_RawWorkspaceLabFocusedProjectName.clear();
         if (!toggle) {
@@ -854,7 +856,7 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 compactFilmstrip, expandedFilmstripDrawer, filmstripDrawerExpansion);
         }
         SelectRawWorkspaceSourceForGallery(
-            sourceKey, toggle, range, openForEditing, range ? &visibleSourceOrder : nullptr);
+            sourceKey, toggle, range, openForEditing, range ? &visibleSourceOrder : nullptr, std::move(origin));
         const bool collapsedRange=range && m_PermanentGalleryWorkspace &&
             (compactFilmstrip ? filmstripDrawerExpansion<=.001f :
                 m_RawWorkspaceGalleryDisplayMode!=Stack::RawWorkspace::GalleryDisplayMode::List && !gridBrowse.groupCount);
@@ -1504,8 +1506,10 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                     click.KeyCtrl,
                     click.KeyShift);
                 if (doubleClicked && !selectionModifier) {
+                    auto origin = m_PermanentGalleryWorkspace ? CaptureGalleryTransitionOrigin(
+                        activeProjectPath, source.relativePathKey, tileMotion.Map(badgeArea)) : Stack::Renderer::GalleryTransitionOrigin{};
                     RequestOpenRawWorkspaceProjectFromGallery(
-                        activeProjectPath);
+                        activeProjectPath, std::move(origin));
                 }
             } else {
                 const bool creationMode =
@@ -1514,11 +1518,12 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
                 if(IsBracketingToolActive() && !m_RawWorkspaceLabUi.galleryWorkspaceOpen &&
                     filmstripTargetMembers && (!compactFilmstrip || filmstripDrawerExpansion <= 0.001f))
                     SelectBracketingSources(*filmstripTargetMembers,click.KeyCtrl,click.KeyShift);
-                else selectSource(
-                    source.relativePathKey,
-                    click.KeyCtrl,
-                    click.KeyShift,
-                    doubleClicked && !creationMode && !selectionModifier);
+                else {
+                    const bool open = doubleClicked && !creationMode && !selectionModifier;
+                    auto origin = open && m_PermanentGalleryWorkspace ? CaptureGalleryTransitionOrigin(
+                        source.absolutePath, source.relativePathKey, tileMotion.Map(badgeArea)) : Stack::Renderer::GalleryTransitionOrigin{};
+                    selectSource(source.relativePathKey, click.KeyCtrl, click.KeyShift, open, std::move(origin));
+                }
             }
         }
         if (!queuePlaceholder && tileHovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
@@ -3017,6 +3022,8 @@ void EditorModule::RenderRawWorkspaceLabGalleryContent(
         ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) {
         const ImGuiIO& io = ImGui::GetIO();
         if (!io.KeyCtrl && std::abs(io.MouseWheel) > 0.0001f) {
+            if (m_PermanentGalleryWorkspace && m_GalleryNavigationMotion && ImGui::GetScrollMaxY() > 0.f)
+                m_GalleryNavigationMotion->BrowseDuringOpen();
             m_RawWorkspaceLabGalleryScrollTargetY -= io.MouseWheel * 90.0f;
         }
     }
@@ -4212,7 +4219,7 @@ void EditorModule::MarkRawWorkspaceLabNativeGalleryPlatformPresented(GLFWwindow*
 }
 
 bool EditorModule::RequestOpenRawWorkspaceProjectFromGallery(
-    const std::filesystem::path& projectPath) {
+    const std::filesystem::path& projectPath, Stack::Renderer::GalleryTransitionOrigin origin) {
     if (m_PermanentGalleryWorkspace) {
         for (const auto& entry : m_RawWorkspace.sourceSetProjects) {
             if (!entry.unlinked || entry.absolutePath!=projectPath) continue;
@@ -4226,7 +4233,7 @@ bool EditorModule::RequestOpenRawWorkspaceProjectFromGallery(
     if (m_PermanentGalleryWorkspace) {
         if (!m_RawGalleryOpenSelectionHandler) return false;
         RawGalleryOpenSelection selection;
-        selection.items.push_back({projectPath, true});
+        selection.items.push_back({projectPath, true, {}, std::move(origin)});
         m_RawGalleryOpenSelectionHandler(std::move(selection), false);
         return true;
     }

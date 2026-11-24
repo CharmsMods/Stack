@@ -64,10 +64,12 @@ void GalleryFilesystemBrowser::State::RequestPreview(const std::shared_ptr<State
     }
     node->previewRequested=true;
     const auto path=node->path;const bool image=node->kind==Kind::Image;
+    const auto generation=previewGeneration;
+    node->previewGeneration = generation;
     Async::ActivityMetadata activity;activity.label="Folder thumbnail";
     if(!Async::TaskSystem::Get().SubmitThumbnail(std::move(activity),
-            std::shared_ptr<std::atomic<bool>>(self,&self->closed),[self,node,path,image] {
-        Preview result;result.node=node;
+            std::shared_ptr<std::atomic<bool>>(self,&self->closed),[self,node,path,image,generation] {
+        Preview result;result.node=node;result.generation=generation;
         try {
             Apartment apartment;
             if(!self->closed.load() && (SUCCEEDED(apartment.result) || apartment.result==RPC_E_CHANGED_MODE)) {
@@ -112,13 +114,36 @@ void GalleryFilesystemBrowser::State::PumpPreviews() {
     {std::lock_guard lock(mutex);completed.swap(previews);}
     for(auto& result:completed) {
         --previewPending;
-        if(closed.load() || result.pixels.empty())continue;
+        if (closed.load()) continue;
+        if (result.generation != previewGeneration) {
+            if (result.node->previewGeneration == result.generation) result.node->previewRequested = false;
+            continue;
+        }
+        if (result.pixels.empty()) continue;
         // These are thumbnail publication uploads, never idle-frame uploads.
         result.node->texture=GLHelpers::CreateTextureFromPixels(result.pixels.data(),result.width,result.height,4);
         result.node->previewWidth=result.width;result.node->previewHeight=result.height;
         if(result.node->texture)previewNodes.push_back(result.node);
     }
 }
+void GalleryFilesystemBrowser::State::InvalidatePreviews(const std::vector<BrowserFiles::Change>& changes) {
+    ++previewGeneration;
+    const auto affected = [&](const auto& node) {
+        return std::any_of(changes.begin(), changes.end(), [&](const auto& change) {
+            return BrowserFiles::AffectsLocation(change, node->path);
+        });
+    };
+    previewNodes.erase(std::remove_if(previewNodes.begin(), previewNodes.end(), [&](const auto& node) {
+        if (!affected(node)) return false;
+        if (node->texture) glDeleteTextures(1, &node->texture);
+        node->texture = 0;
+        node->previewRequested = false;
+        return true;
+    }), previewNodes.end());
+    for (auto& [key, node] : listings)
+        if (!node->texture && node->previewRequested && affected(node)) node->previewRequested = false;
+}
+
 void GalleryFilesystemBrowser::State::ReleasePreviews() {
     // Called only by the browser on its UI/GL owner, never by a worker or State's destructor.
     for(auto& node:previewNodes) {

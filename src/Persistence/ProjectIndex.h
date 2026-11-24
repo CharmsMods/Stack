@@ -68,6 +68,10 @@ struct ProjectRecord {
     std::string errorMessage;
 };
 
+// Reads the affected managed workspace's project records without changing
+// the shared index. An unreadable working store fails the protection check.
+std::vector<ProjectRecord> ReadBrowserProtectionRecords(const std::filesystem::path& projectsDirectory);
+
 class ProjectIndex {
 public:
     static ProjectIndex& Get();

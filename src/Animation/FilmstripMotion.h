@@ -50,7 +50,7 @@ public:
         const float destination = std::clamp(base - wheel * spacing, 0.f, stops[last]);
         const float bounded = std::clamp(destination, position_ - 2.f*spacing, position_ + 2.f*spacing);
         if (reduced) Reset(bounded, now);
-        else BeginSettle(bounded, now + (continuing ? 0. : .025), .24f);
+        else BeginSettle(bounded, now, .13f);
         lastWheel_ = now; lastTime_ = now; published_ = position_; dragging_ = false;
     }
     void Drag(float position, float maximum, double now) {

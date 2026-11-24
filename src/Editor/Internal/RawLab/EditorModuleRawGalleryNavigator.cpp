@@ -1,8 +1,29 @@
 #include "Editor/EditorModule.h"
 #include "Editor/AutoBracket/AutoBracketCoordinator.h"
 #include "App/AppHeaderStyle.h"
+#include "Editor/Bracketing/BracketingSession.h"
 
 using namespace Stack::Editor::RawLabInternal;
+
+void EditorModule::AppendGalleryFileDependencies(std::vector<std::filesystem::path>& paths) const {
+    paths.push_back(m_Project->storePath);
+    paths.push_back(m_Project->adoptionSourcePath);
+    if (!m_Project->rawRecipe.source.sourcePath.empty())
+        paths.push_back(std::filesystem::u8path(m_Project->rawRecipe.source.sourcePath));
+    if (m_Project->snapshot) {
+        for (const auto& asset : m_Project->snapshot->embeddedAssets) {
+            if (!asset.linkedSource) continue;
+            if (!asset.originalSourcePath.empty()) paths.push_back(std::filesystem::u8path(asset.originalSourcePath));
+            if (!asset.workspaceRelativeSourcePath.empty() && !m_RawWorkspace.workspaceRoot.empty())
+                paths.push_back(m_RawWorkspace.workspaceRoot / std::filesystem::u8path(asset.workspaceRelativeSourcePath));
+        }
+    }
+    if (m_Bracketing)
+        for (const auto& source : m_Bracketing->sources) paths.push_back(source.path);
+    if (m_AutoBracket)
+        if (const auto work = m_AutoBracket->Current())
+            for (const auto& source : work->item.candidate.sources) paths.push_back(source.path);
+}
 
 void EditorModule::SynchronizeRawGalleryFolderScope() {
     if (m_RawGalleryFolderWorkspaceRoot == m_RawWorkspace.workspaceRoot &&
@@ -52,7 +73,43 @@ void EditorModule::RenderRawGalleryFolderPanel() {
         m_RawWorkspaceGalleryGridStacks.Close();
         m_RawWorkspaceGalleryLayoutAnimation.Reset();
     }
-    if(action.openPath)RequestOpenRawWorkspace(*action.openPath);
+    auto requestedPath = action.openPath;
+    if (!action.fileChanges.empty() && m_PermanentGalleryWorkspace) {
+        using namespace Stack::BrowserFiles;
+        const auto root = m_RawWorkspace.workspaceRoot;
+        const auto visible = m_RawGalleryFolderFilter
+            ? root / std::filesystem::u8path(*m_RawGalleryFolderFilter) : root;
+        if (!requestedPath && !visible.empty()) {
+            auto remapped = RemapLocation(visible, action.fileChanges);
+            if (remapped.native() != visible.native()) requestedPath = std::move(remapped);
+        }
+        bool registrationChanged = false;
+        const auto remapFolders = [&](auto& folders) {
+            for (auto& folder : folders) {
+                auto path = RemapLocation(folder, action.fileChanges);
+                registrationChanged |= path.native() != folder.native();
+                folder = std::move(path);
+            }
+        };
+        remapFolders(m_RawWorkspace.registeredSourceFolders);
+        remapFolders(m_RawWorkspace.recentWorkspaceRoots);
+        if (registrationChanged) {
+            ++m_RawGalleryFolderCardRevision;
+            SaveRawWorkspaceAppState();
+        }
+        if (!requestedPath && std::any_of(action.fileChanges.begin(), action.fileChanges.end(),
+                [&](const auto& change) { return AffectsLocation(change, root); })) {
+            {
+                std::lock_guard lock(m_RawWorkspaceScanMutex);
+                m_RawWorkspaceScanSnapshot.generation = ++m_RawWorkspaceScanGeneration;
+                m_RawWorkspaceScanSnapshot.state = Async::TaskState::Idle;
+            }
+            ++m_RawWorkspaceGalleryGridStacks.navigationRevision;
+            InvalidateRawWorkspaceGalleryPresentation();
+            RefreshRawGalleryAfterFileMove(root);
+        }
+    }
+    if(requestedPath)RequestOpenRawWorkspace(*requestedPath);
     if(action.openImage && m_RawGalleryOpenSelectionHandler) {
         RawGalleryOpenSelection selection;
         selection.items.push_back({*action.openImage,false,action.openImage->parent_path()});

@@ -208,6 +208,28 @@ std::pair<std::uint64_t, std::int64_t> ProjectIndexSignature(
 
 } // namespace
 
+std::vector<ProjectRecord> ReadBrowserProtectionRecords(const std::filesystem::path& projectsDirectory) {
+    std::vector<ProjectRecord> records;
+    std::error_code error;
+    if (!std::filesystem::exists(projectsDirectory, error) && !error) return records;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(projectsDirectory)) {
+        if (!HasStackExtension(entry.path()) || !entry.is_regular_file()) continue;
+        if (auto opened = OpenProjectStore(entry.path())) {
+            ProjectRecord record;
+            record.absolutePath = entry.path();
+            AppendRawWorkspaceMetadata(opened.snapshot.rawWorkspaceData, record);
+            AppendSnapshotSources(opened.snapshot, record.sources);
+            if (!record.sources.empty())
+                record.rawSourceLinked = std::any_of(record.sources.begin(), record.sources.end(),
+                    [](const auto& source) { return source.linked; });
+            records.push_back(std::move(record));
+        } else if (IsWorkingProjectFile(entry.path())) {
+            throw std::runtime_error("Could not check source links in " + entry.path().u8string());
+        }
+    }
+    return records;
+}
+
 ProjectIndex& ProjectIndex::Get() {
     static ProjectIndex index;
     return index;

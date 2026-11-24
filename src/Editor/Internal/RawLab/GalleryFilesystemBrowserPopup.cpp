@@ -21,10 +21,16 @@ void GalleryFilesystemBrowser::Open(const std::filesystem::path& current) {
 GalleryFilesystemBrowser::Action GalleryFilesystemBrowser::RenderPopup() {
     constexpr auto title="##GalleryFolderPicker";
     if(openRequested_) {ImGui::OpenPopup(title);openRequested_=false;}
+    Action changed;
+    PumpFiles(changed);
     if(!ImGui::IsPopupOpen(title)) {
-        if(!state_->closed.exchange(true) && state_->searchIndex)state_->searchIndex->Suspend();
-        state_->motion.Stop();state_->ReleasePreviews(); // Previous frame has already been submitted.
-        return {};
+        if (!state_->closed.load()) {
+            state_->closed.store(true);
+            if (state_->searchIndex) state_->searchIndex->Suspend();
+        }
+        if (state_->motion.Active()) state_->motion.Stop();
+        if (!state_->previewNodes.empty()) state_->ReleasePreviews();
+        return changed;
     }
     const auto* viewport=ImGui::GetMainViewport();
     const float unit=ImGui::GetFontSize()/14.f;
@@ -36,17 +42,17 @@ GalleryFilesystemBrowser::Action GalleryFilesystemBrowser::RenderPopup() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize,0);
     ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize,0);
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding,0);
-    Action changed;
     if(ImGui::BeginPopupModal(title,nullptr,ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoTitleBar |
             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar)) {
         auto& s=*state_;
+        s.escapeConsumed = false;
         s.PumpPreviews();
         const auto navigate=Render(s.current);
+        RenderFileDialogs();
         if(navigate && State::Key(*navigate)!=s.currentKey) {
             const bool outward=!s.current.empty() && *navigate==s.current.parent_path();
             s.returnFolder=outward?s.currentKey:std::wstring{};s.locateReturn=outward;
-            const auto cover=s.selection && s.selection->path==*navigate?s.selection:nullptr;
-            s.motion.Start(outward,s.navigationTile,cover?cover->texture:0,cover?cover->previewWidth:0,cover?cover->previewHeight:0);
+            s.motion.Start(outward, outward ? ImRect{} : s.navigationTile);
             s.Navigate(*navigate);
             s.publishNavigation=true;
         }
@@ -54,16 +60,18 @@ GalleryFilesystemBrowser::Action GalleryFilesystemBrowser::RenderPopup() {
         if(s.publishNavigation && s.directory && s.directory->loaded && !s.directory->pending && s.directory->error.empty()) {
             changed.folder=s.directory->path;s.publishNavigation=false;s.publishedKey=s.currentKey;
         }
-        if(ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        if(!FileOperationBusy() && !s.escapeConsumed && ImGui::IsKeyPressed(ImGuiKey_Escape) &&
+            GImGui->OpenPopupStack.Size==GImGui->BeginPopupStack.Size) {
             ImGui::SetKeyOwner(ImGuiKey_Escape,ImGui::GetID("PickerEscape"),ImGuiInputFlags_LockUntilRelease);
-            s.closeRequested=true;
+            if (s.leftOrigin || s.rightDrag.Active()) s.CancelGridInput(false);
+            else s.closeRequested=true;
         }
         const auto* popup=ImGui::GetCurrentWindow();
         const bool outside=!popup->Rect().Contains(ImGui::GetIO().MousePos);
-        if(outside && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+        if(!FileOperationBusy() && outside && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
             GImGui->OpenPopupStack.Size==GImGui->BeginPopupStack.Size)s.closeRequested=true;
         if(s.openImage){changed.image=std::move(s.openImage);changed.folder.reset();s.closeRequested=true;}
-        if(s.closeRequested){s.motion.Stop();s.closed.store(true);if(s.searchIndex)s.searchIndex->Suspend();ImGui::CloseCurrentPopup();}
+        if(s.closeRequested && !FileOperationBusy()){s.motion.Stop();s.closed.store(true);if(s.searchIndex)s.searchIndex->Suspend();ImGui::CloseCurrentPopup();}
         ImGui::EndPopup();
     }
     ImGui::PopStyleVar(5);
@@ -78,7 +86,8 @@ void GalleryFilesystemBrowser::RenderTiles(std::optional<std::filesystem::path>&
         return;
     }
     if(s.directory && (!s.directory->loaded || s.directory->pending)) {
-        ImGui::TextDisabled("Loading folders...");return;
+        if (!s.motion.HideLiveGrid()) ImGui::TextDisabled("Loading folders...");
+        return;
     }
     const bool searching=!s.searchKey.empty();
     if(searching && (s.searchScheduled || s.searchPending)){ImGui::TextDisabled("Searching...");return;}
@@ -101,6 +110,10 @@ void GalleryFilesystemBrowser::RenderTiles(std::optional<std::filesystem::path>&
                     if(ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)){if(node->kind==State::Kind::Image)s.openImage=node->path;else {navigate=node->path;s.navigationTile={pos,{pos.x+width,pos.y+82*unit}};}}
                 }
                 if(!s.motion.Active() && ImGui::IsItemFocused() && ImGui::IsKeyPressed(ImGuiKey_Enter)){if(node->kind==State::Kind::Image)s.openImage=node->path;else {navigate=node->path;s.navigationTile={pos,{pos.x+width,pos.y+82*unit}};}}
+                if (!s.motion.Active() && ImGui::BeginPopupContextItem("DriveOptions")) {
+                    RenderFolderCommands(node->path);
+                    ImGui::EndPopup();
+                }
                 if(ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))ImGui::SetTooltip("%s",node->pathLabel.c_str());
                 auto* draw=ImGui::GetWindowDrawList();
                 const auto ink=ImGui::GetColorU32(ImGuiCol_TextDisabled);
@@ -130,6 +143,9 @@ void GalleryFilesystemBrowser::RenderTiles(std::optional<std::filesystem::path>&
         return;
     }
     if(tiles.empty()) {
+        if (navigate && !s.current.empty() && *navigate == s.current.parent_path())
+            s.motion.Capture(s.gridBounds);
+        if (s.motion.HideLiveGrid()) return;
         ImGui::TextWrapped("%s",searching?(s.searchRefreshing?"Indexing images and folders...":"No matching images or folders"):s.directory?"No images or subfolders":
             s.rootsPending?"Loading locations...":s.locationsError.empty()?"No locations available.":s.locationsError.c_str());
         return;
@@ -147,6 +163,20 @@ void GalleryFilesystemBrowser::RenderTiles(std::optional<std::filesystem::path>&
             break;
         }
     }
+    const auto gridOrigin = ImGui::GetCursorScreenPos();
+    const bool hideLiveGrid = s.motion.HideLiveGrid();
+    if (hideLiveGrid) {
+        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0, 0, 0, 0));
+    }
+    const auto tileFor = [&](const State::Node& node, ImRect bounds) {
+        return GalleryBrowserMotion::Tile{bounds, node.label.c_str(), node.texture,
+            node.previewWidth, node.previewHeight, node.kind == State::Kind::Image, unit,
+            [](bool image, ImVec2 pos, float size, ImU32 color) {
+                LibraryUi::DrawIcon(image ? LibraryUi::Icon::Gallery : LibraryUi::Icon::Folder, pos, size, color);
+            }};
+    };
     ImGuiListClipper clipper;
     clipper.Begin(static_cast<int>((tiles.size()+columns-1)/columns),tileHeight);
     while(clipper.Step())for(int row=clipper.DisplayStart;row<clipper.DisplayEnd;++row) {
@@ -161,27 +191,48 @@ void GalleryFilesystemBrowser::RenderTiles(std::optional<std::filesystem::path>&
             if(s.motion.Active() && s.motion.Outward() && node->key==s.returnFolder)s.motion.Anchor(tileBounds);
             if(navigate && *navigate==node->path)s.navigationTile=tileBounds;
             ImGui::PushID(node.get());
-            if(ImGui::Selectable("##Tile",s.selection==node,ImGuiSelectableFlags_AllowDoubleClick,{tileWidth-6*unit,tileHeight-6*unit})) {
+            const bool pressed = ImGui::Selectable("##Tile",s.GridSelected(index) || (!s.selectedRange && s.selection==node),
+                ImGuiSelectableFlags_AllowDoubleClick,{tileWidth-6*unit,tileHeight-6*unit});
+            const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+            if (hovered) s.hit = {node, tileBounds, index};
+            if(pressed && !s.movingImages && !s.rightDrag.Active() &&
+                !(s.leftOrigin && ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left))) {
+                s.selectedRange.reset();
                 s.selection=node;
                 if(ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)){if(node->kind==State::Kind::Image)s.openImage=node->path;else {navigate=node->path;s.navigationTile={pos,{pos.x+tileWidth-6*unit,pos.y+tileHeight-6*unit}};}}
             }
             if(!s.motion.Active() && ImGui::IsItemFocused() && ImGui::IsKeyPressed(ImGuiKey_Enter)){if(node->kind==State::Kind::Image)s.openImage=node->path;else {navigate=node->path;s.navigationTile={pos,{pos.x+tileWidth-6*unit,pos.y+tileHeight-6*unit}};}}
-            if(ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))ImGui::SetTooltip("%s",node->path.u8string().c_str());
+            const bool drop = node->kind == State::Kind::Image
+                ? hovered && s.movingImages && s.draggedImages.size() == 1 && s.draggedImages.front() != node->path
+                : FolderDropTarget(node->path, hovered);
+            if (drop) ImGui::GetWindowDrawList()->AddRect(tileBounds.Min, tileBounds.Max,
+                ImGui::GetColorU32(ImGuiCol_HeaderActive), 6*unit, 0, 2*unit);
+            if(!s.movingImages && !s.rightDrag.Active() && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+                ImGui::SetTooltip("%s",node->pathLabel.c_str());
             node->previewFrame=ImGui::GetFrameCount();
             s.RequestPreview(state_,node);
-            if(node->texture) {
-                const float scale=std::min((tileWidth-24*unit)/node->previewWidth,(tileHeight-46*unit)/node->previewHeight);
-                const ImVec2 size{node->previewWidth*scale,node->previewHeight*scale};
-                const ImVec2 imagePos{pos.x+(tileWidth-size.x)*.5f,pos.y+8*unit+(tileHeight-46*unit-size.y)*.5f};
-                ImGui::GetWindowDrawList()->AddImageRounded((ImTextureID)(intptr_t)node->texture,imagePos,
-                    {imagePos.x+size.x,imagePos.y+size.y},{0,0},{1,1},IM_COL32_WHITE,6*unit);
-            } else LibraryUi::DrawIcon(node->kind==State::Kind::Image?LibraryUi::Icon::Gallery:LibraryUi::Icon::Folder,{pos.x+(tileWidth-56*unit)*.5f,pos.y+28*unit},56*unit,ImGui::GetColorU32(ImGuiCol_TextDisabled));
-            ImGui::RenderTextEllipsis(ImGui::GetWindowDrawList(),{pos.x+8*unit,pos.y+tileHeight-28*unit},
-                {pos.x+tileWidth-14*unit,pos.y+tileHeight},pos.x+tileWidth-14*unit,node->label.c_str(),nullptr,nullptr);
+            s.motion.DrawLiveTile(*ImGui::GetWindowDrawList(), tileFor(*node, tileBounds));
             ImGui::PopID();
         }
         ImGui::SetCursorScreenPos(start);
         ImGui::Dummy({width,tileHeight});
+    }
+    if (hideLiveGrid) ImGui::PopStyleColor(3);
+    if (!LibraryUi::ReducedMotion() && navigate && !s.motion.Active() &&
+        (*navigate == s.current.parent_path() || s.navigationTile.GetWidth() > 0)) {
+        s.motion.Capture(s.gridBounds);
+        const int rows = static_cast<int>((tiles.size() + columns - 1) / columns);
+        const int first = std::max(0, static_cast<int>((s.gridBounds.Min.y - gridOrigin.y) / tileHeight));
+        const int end = std::min(rows, 1 + static_cast<int>((s.gridBounds.Max.y - gridOrigin.y) / tileHeight));
+        for (int row = first; row < end; ++row) {
+            for (int column = 0; column < columns; ++column) {
+                const auto index = static_cast<std::size_t>(row) * columns + column;
+                if (index >= tiles.size()) break;
+                const ImVec2 pos{gridOrigin.x + column*tileWidth, gridOrigin.y + row*tileHeight};
+                s.motion.CaptureTile(tileFor(*tiles[index],
+                    {pos, {pos.x + tileWidth - 6*unit, pos.y + tileHeight - 6*unit}}));
+            }
+        }
     }
 }
 }

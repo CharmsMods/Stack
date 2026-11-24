@@ -131,6 +131,7 @@ void GalleryNavigationTransition::CancelImage() {
 void GalleryNavigationTransition::Retire(std::uint64_t workspace) {if(Owns(workspace))CancelImage();}
 ImRect GalleryNavigationTransition::PresentImage(std::uint64_t workspace,ImRect target,unsigned int texture) {
     if(!Owns(workspace) || returning)return target;
+    if(!texture && !liveReady)return departure;
     liveTexture=texture;
     if(!liveReady){liveReady=true;readyAt=time;}
     if(reduced) {
@@ -176,8 +177,7 @@ void GalleryNavigationTransition::DrawLoader(ImDrawList& draw,ImRect bounds,floa
 }
 void GalleryNavigationTransition::DrawOverlay(ImDrawList& draw) {
     if(AwaitingPreview()) {
-        DrawLoader(draw,{pendingOrigin.minimum,pendingOrigin.maximum},
-            reduced ? 1.f : Smooth(float((time-pendingSince)/.14)),reduced);
+        DrawLoader(draw,{pendingOrigin.minimum,pendingOrigin.maximum},1.f,reduced);
         return;
     }
     if(!HasImage() || (reduced && liveReady))return;
@@ -197,8 +197,7 @@ void GalleryNavigationTransition::DrawOverlay(ImDrawList& draw) {
         const ImVec2 uvHigh(imageOrigin.uvMaximum.x+(1-imageOrigin.uvMaximum.x)*crop,imageOrigin.uvMaximum.y*(1-crop));
         draw.AddImage(static_cast<ImTextureID>(imageOrigin.thumbnail->texture),low,high,uvLow,uvHigh,ink);
     } else if(!liveReady && !returning)draw.AddRectFilled(low,high,ImGui::GetColorU32(ImVec4(.12f,.12f,.12f,opacity)),3);
-    if(!returning && readyBlend<1.f)
-        DrawLoader(draw,{low,high},1.f-readyBlend,reduced);
+    if(!returning && !liveReady) DrawLoader(draw,{low,high},1.f,reduced);
     if(liveTexture && readyBlend>0) {
         const float crop=std::clamp(imageCrop.Value(),0.f,1.f);
         const ImVec2 uvLow(imageOrigin.uvMinimum.x*(1-crop),imageOrigin.uvMinimum.y+(1-imageOrigin.uvMinimum.y)*crop);

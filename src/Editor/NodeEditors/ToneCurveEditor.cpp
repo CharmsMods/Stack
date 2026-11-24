@@ -21,32 +21,29 @@ void DrawPhotoChannels(ToneCurveEditorState& state,bool rgbOnly) {
     const float side = ImGui::GetFrameHeight();
     const char* names[] = {"Luminance","Red","Green","Blue"};
     const int first=rgbOnly?1:0;
+    const float available = ImGui::GetContentRegionAvail().x;
+    const float gap = rgbOnly ? std::min(style.controlGap, std::max(0.f, available - 3.f) / 2.f) : style.controlGap;
+    const float width = rgbOnly ? std::clamp((available - 2.f * gap) / 3.f, 1.f, side) : side;
+    if (rgbOnly) {
+        const float rowWidth = 3.f * width + 2.f * gap;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.f, (available - rowWidth) * .5f));
+    }
     for (int i = first; i < 4; ++i) {
-        if (i!=first) ImGui::SameLine(0, style.controlGap);
+        if (i!=first) ImGui::SameLine(0, gap);
         ImGui::PushID("PhotoChannel");
-        const float width=rgbOnly?std::min(ImGui::GetFontSize()*4.6f,(ImGui::GetContentRegionAvail().x-style.controlGap*(3-i))/(4-i)):side;
-        if (ImGui::InvisibleButton(names[i], {std::max(1.f,width), side}, ImGuiButtonFlags_EnableNav) && state.photoChannel != i) {
+        if (ImGui::InvisibleButton(names[i], {width, side}, ImGuiButtonFlags_EnableNav) && state.photoChannel != i) {
             state.EndInteraction();
             state.photoChannel = i;
             if(i>0)state.panelRgbChannel=i;
         }
         const auto pos = ImGui::GetItemRectMin();
-        const ImVec2 center{pos.x + side * .5f, pos.y + side * .5f};
+        const ImVec2 center{pos.x + width * .5f, pos.y + side * .5f};
+        const float dotSize = std::min(width, side);
         auto* draw = ImGui::GetWindowDrawList();
         const auto color = i ? style.channel[i-1] : IM_COL32_WHITE;
-        if(rgbOnly) {
-            const bool selected=state.photoChannel==i;
-            const auto high=ImGui::GetItemRectMax();
-            if(selected || ImGui::IsItemHovered())draw->AddRectFilled(pos,high,ImGui::GetColorU32(selected?ImGuiCol_Header:ImGuiCol_HeaderHovered,selected?.75f:.38f),side*.32f);
-            if(ImGui::IsItemFocused())draw->AddRect(pos,high,ImGui::GetColorU32(ImGuiCol_NavCursor),side*.32f);
-            draw->AddCircleFilled({pos.x+side*.42f,center.y},side*.13f,color);
-            draw->AddText({pos.x+side*.72f,center.y-ImGui::GetFontSize()*.5f},ImGui::GetColorU32(ImGuiCol_Text,selected?1.f:.77f),names[i]);
-            ImGui::PopID();
-            continue;
-        }
-        draw->AddCircleFilled(center, side * .20f, color);
+        draw->AddCircleFilled(center, dotSize * .20f, color);
         if (state.photoChannel == i || ImGui::IsItemHovered())
-            draw->AddCircle(center, side * .34f, style.curve, 0, state.photoChannel == i ? style.curveWidth : 1.f);
+            draw->AddCircle(center, dotSize * .34f, style.curve, 0, state.photoChannel == i ? style.curveWidth : 1.f);
         if (ImGui::IsItemHovered() || ImGui::IsItemFocused()) ImGui::SetTooltip("%s curve", names[i]);
         ImGui::PopID();
     }

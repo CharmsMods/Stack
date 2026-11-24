@@ -240,6 +240,24 @@ bool QueueRenderCoordinator::RequestInspection(
     return true;
 }
 
+void QueueRenderCoordinator::AppendActiveFileDependencies(std::vector<std::filesystem::path>& paths) const {
+    if (IsBusy()) {
+        paths.push_back(m_Destination);
+        paths.push_back(m_CurrentOutputPath);
+        paths.push_back(m_Current.path);
+    }
+    if (m_InspectionPhase != InspectionPhase::Idle) {
+        paths.push_back(m_CurrentInspection.projectPath);
+        paths.push_back(m_CurrentInspection.sourcePath);
+    }
+    if (m_PendingInspection) {
+        paths.push_back(m_PendingInspection->projectPath);
+        paths.push_back(m_PendingInspection->sourcePath);
+    }
+    if (m_RenderEditor && (IsBusy() || IsInspectionBusy()))
+        m_RenderEditor->AppendGalleryFileDependencies(paths);
+}
+
 bool QueueRenderCoordinator::IsBusy() const {
     return m_Phase != Phase::Idle;
 }

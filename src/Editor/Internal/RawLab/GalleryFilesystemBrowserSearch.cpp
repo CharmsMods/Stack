@@ -5,6 +5,7 @@ namespace Stack::Editor::RawLabInternal {
 void GalleryFilesystemBrowser::State::SearchChanged() {
     if(searchIndex)searchRequest=searchIndex->Search(L"");
     searchKey=std::filesystem::u8path(search).wstring();
+    CancelGridInput(true);
     searchResults.clear();selection.reset();searchLimited=false;searchPending=false;
     searchRefreshing=false;searchStatus.clear();
     searchScheduled=!searchKey.empty();searchAt=ImGui::GetTime()+.12;resetGridScroll=true;
@@ -28,6 +29,9 @@ void GalleryFilesystemBrowser::State::PumpSearch(const std::shared_ptr<State>&) 
     std::unordered_map<std::wstring,std::shared_ptr<Node>> previous;
     for(const auto& node:searchResults)previous.emplace(node->key,node);
     for(auto& node:found)if(const auto old=previous.find(node->key);old!=previous.end())node=old->second;
+    const bool changed = found.size() != searchResults.size() ||
+        !std::equal(found.begin(), found.end(), searchResults.begin());
+    if (changed) CancelGridInput(true);
     searchResults=std::move(found);searchLimited=result.partial;searchRefreshing=result.refreshing;
     searchStatus=std::move(result.status);searchPending=false;
 }

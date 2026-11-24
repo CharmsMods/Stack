@@ -843,6 +843,16 @@ if (BUILD_TESTING)
     include(cmake/StackFilmstripTimelineRangeTests.cmake)
     include(cmake/StackGalleryWidgetIdentityTests.cmake)
     include(cmake/StackGalleryNavigatorTests.cmake)
+    if(WIN32)
+        add_executable(StackGalleryBrowserFileTests
+            tools/tests/gallery_browser_file_tests.cpp
+            src/Platform/BrowserFileHistory.cpp
+            src/Editor/Internal/RawLab/GalleryBrowserMotion.cpp)
+        target_include_directories(StackGalleryBrowserFileTests PRIVATE src)
+        target_link_libraries(StackGalleryBrowserFileTests PRIVATE imgui_core)
+        add_test(NAME StackRaw.GalleryBrowserFiles COMMAND StackGalleryBrowserFileTests)
+        set_tests_properties(StackRaw.GalleryBrowserFiles PROPERTIES LABELS "raw;gallery;ui;cpu" TIMEOUT 30)
+    endif()
     include(cmake/StackViewTransformGraphTests.cmake)
     include(cmake/StackSceneToneOwnerTests.cmake)
     include(cmake/StackBezierCurveOwnerTests.cmake)
